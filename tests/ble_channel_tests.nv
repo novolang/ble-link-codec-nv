@@ -1,0 +1,141 @@
+// tests/ble_channel_tests.nv — the API tests for the two selection
+// algorithms, written against the signatures.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// ble_channel.<fn>` from the `todo()` that is each body.
+//
+// The reference is Core Vol 6 Part B § 4.5.8.  Two kinds of assertion
+// are here and the difference matters:
+//
+//   - the ARITHMETIC, which the specification states as a formula and
+//     which this file can therefore check in full: CSA #1's
+//     `(previous + hop) mod 37`, the remapping table, and CSA #2's
+//     channel identifier;
+//   - the SAMPLE CHANNELS of § 4.5.8.3.5, which are a table of numbers
+//     and not a formula.  Those are NOT written down here as guesses.
+//     The implementation lane transcribes them from the Core
+//     Specification, and what this file asserts in the meantime is the
+//     property every answer must have whatever the table says: a
+//     channel in 0..36 that the map actually uses.
+//
+// A wrong expected value in a red test is worse than a missing one: it
+// costs the implementation lane a day proving the package right and the
+// test wrong.
+
+use std.test
+use ble_channel
+use ble_link
+
+fn all() -> LlChannelMap
+    ble_link.all_channels()
+
+// Channels 0, 1, 2 and 36 only.
+fn sparse() -> LlChannelMap
+    match ble_link.channel_map([0x07 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8, 0x10 as u8])
+        Ok(m)  => m
+        // Five bytes ARE a channel map; a refusal here is this file's
+        // bug, and `todo` diverges so the match still has one type.
+        Err(_) => todo("ble_channel_tests.sparse")
+
+@test
+fn test_csa1_is_addition_modulo_thirty_seven()
+    // The formula § 4.5.8.2 states, with every channel used so the
+    // remapping table is the identity.
+    match ble_channel.next_channel_csa1(0, 5, all())
+        Err(_) => test.fail("channel 0 plus a hop of 5 is channel 5")
+        Ok(ch) => test.assert_eq(ch, 5)
+    match ble_channel.next_channel_csa1(5, 5, all())
+        Err(_) => test.fail("5 plus 5 is 10")
+        Ok(ch) => test.assert_eq(ch, 10)
+
+@test
+fn test_csa1_wraps_at_thirty_seven()
+    // 35 + 5 = 40, and 40 mod 37 is 3.  The wrap is the one line of
+    // CSA #1 a hand-written controller gets wrong.
+    match ble_channel.next_channel_csa1(35, 5, all())
+        Err(_) => test.fail("the hop wraps rather than leaving the band")
+        Ok(ch) => test.assert_eq(ch, 3)
+    match ble_channel.next_channel_csa1(36, 16, all())
+        Err(_) => test.fail("36 plus 16 is 52, and 52 mod 37 is 15")
+        Ok(ch) => test.assert_eq(ch, 15)
+
+@test
+fn test_csa1_remaps_onto_a_used_channel()
+    // The map uses 0, 1, 2 and 36.  From channel 0 a hop of 5 lands on
+    // 5, which is unused, so the remapping table of § 4.5.8.2 takes
+    // `5 mod 4` = 1, and the first-indexed used channel is 1.
+    match ble_channel.next_channel_csa1(0, 5, sparse())
+        Err(_) => test.fail("an unused channel is remapped, not skipped")
+        Ok(ch) => test.assert_eq(ch, 1)
+    // And a landing on a channel the map DOES use is left alone.
+    match ble_channel.next_channel_csa1(35, 3, sparse())
+        Err(_) => test.fail("35 plus 3 is 38, and 38 mod 37 is 1, which is used")
+        Ok(ch) => test.assert_eq(ch, 1)
+
+@test
+fn test_a_map_that_uses_nothing_has_no_answer()
+    // Returning channel 0 here would be a connection quietly
+    // transmitting where it was told not to.
+    match ble_link.channel_map([0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8])
+        Err(_)  => test.fail("five zero bytes are a well-formed map that uses nothing")
+        Ok(map) =>
+            match ble_channel.next_channel_csa1(0, 5, map)
+                Ok(_)  => test.fail("there is no channel to hop to")
+                Err(e) =>
+                    match e
+                        LlNoChannelUsed => test.assert(true)
+                        _               => test.fail("the refusal names the empty map")
+
+@test
+fn test_the_channel_identifier_is_the_access_address_folded_in_half()
+    // § 4.5.8.3.1: (AA >> 16) xor (AA & 0xFFFF).  The advertising
+    // access address 0x8E89BED6 folds to 0x8E89 xor 0xBED6 = 0x305F.
+    test.assert_eq(ble_channel.channel_identifier(0x8E89BED6), 0x305F)
+    // A connection's own access address folds the same way.
+    test.assert_eq(ble_channel.channel_identifier(0x50655DAB), 0x0DCE)
+
+@test
+fn test_csa2_answers_from_the_event_counter_alone()
+    // The property the algorithm exists for: a device that slept
+    // through forty events computes the forty-first channel without
+    // iterating, so the answer depends on the counter and not on the
+    // previous channel.  The § 4.5.8.3.5 sample table is what the
+    // implementation is checked against; what is checkable before it is
+    // transcribed is that the answer is a channel the map uses.
+    let identifier = ble_channel.channel_identifier(0x8E89BED6)
+    match ble_channel.channel_csa2(1, identifier, all())
+        Err(_) => test.fail("every channel is used, so there is always an answer")
+        Ok(ch) =>
+            test.assert(ch >= 0)
+            test.assert(ch < 37)
+    match ble_channel.channel_csa2(40, identifier, all())
+        Err(_) => test.fail("event 40 is answered without computing events 1 to 39")
+        Ok(ch) =>
+            test.assert(ch >= 0)
+            test.assert(ch < 37)
+
+@test
+fn test_csa2_lands_on_a_channel_the_map_uses()
+    let identifier = ble_channel.channel_identifier(0x8E89BED6)
+    match ble_channel.channel_csa2(7, identifier, sparse())
+        Err(_) => test.fail("four channels are used, so there is an answer")
+        Ok(ch) => test.assert(ble_link.channel_used(sparse(), ch))
+
+@test
+fn test_the_unmapped_half_of_csa2_is_exposed_on_its_own()
+    // The Core Specification gives sample values for the unmapped
+    // channel as well as the final one, and a harness that could only
+    // check the final answer could not say which half was wrong.
+    let identifier = ble_channel.channel_identifier(0x8E89BED6)
+    let unmapped = ble_channel.unmapped_channel_csa2(1, identifier)
+    test.assert(unmapped >= 0)
+    test.assert(unmapped < 37)
+
+@test
+fn test_csa2_on_an_empty_map_has_no_answer_either()
+    match ble_link.channel_map([0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8])
+        Err(_)  => test.fail("five zero bytes are a well-formed map that uses nothing")
+        Ok(map) =>
+            match ble_channel.channel_csa2(1, 0x305F, map)
+                Ok(_)  => test.fail("there is no channel to select")
+                Err(_) => test.assert(true)

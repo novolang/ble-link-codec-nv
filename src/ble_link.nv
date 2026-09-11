@@ -1,0 +1,467 @@
+// ble_link — the Bluetooth LE link-layer packet codec, with no radio.
+//
+// Every body is a `todo()`.  The signatures and the effect rows are the
+// design, and the compiler checks them as claims; see the README for
+// the stamp.
+//
+// Core Vol 6 Part B.  The link layer is where a BLE stack meets the
+// air, and it is two things stacked: a set of packet formats, and a
+// state machine wired to a radio's timers.  This package is the first
+// of those and none of the second.  Every doc comment names the section
+// its format comes from, because the only way to check a codec is
+// against the specification that defines it.
+//
+// Every multi-byte field is little-endian and every address is
+// LSB-first, which is the link layer's convention throughout.
+//
+// WHAT THIS PACKAGE DOES NOT HOLD: an address.  Not a Bluetooth
+// address — those are values here — but a RAM address.  A link-layer
+// codec written against fixed buffers is how two subsystems come to
+// share one, and the values below are the shape that makes that
+// impossible: a `LlConnectIndPayload` a caller holds cannot be
+// overwritten by an encryption context, because it is not anywhere in
+// particular.
+
+// ── Addresses (§ 1.3) ───────────────────────────────────────────────
+
+// A device address and which kind it is.
+//
+// `random` is the TxAdd or RxAdd bit of the PDU header, and it is part
+// of the address rather than beside it because the two are only
+// meaningful together: the same six bytes are a different device
+// depending on the bit, and a stack that carried them separately will
+// eventually compare one without the other.
+pub struct LlAddress
+    bytes: [u8]
+    random: Bool
+
+// How many bytes a device address is.
+pub const ADDRESS_LEN = 6
+
+// ── Advertising PDUs (§ 2.3) ────────────────────────────────────────
+
+// The four-bit PDU type of an advertising-channel packet (§ 2.3,
+// Table 2.3).
+pub enum LlAdvType
+    LlAdvInd
+    LlAdvDirectInd
+    LlAdvNonconnInd
+    LlScanReq
+    LlScanRsp
+    LlConnectInd
+    LlAdvScanInd
+    LlAdvExtInd
+    // 0x8 to 0xF: reserved for future use, kept rather than dropped so
+    // a decode of a capture says what it saw.
+    LlAdvReserved(code: Int)
+
+// The header of an advertising-channel packet (§ 2.3).
+//
+// Two bytes: the first is `[PduType(4) | RFU(1) | ChSel(1) | TxAdd(1) |
+// RxAdd(1)]` from the low bit up, and the second is the payload length.
+// `channel_selection` is the ChSel bit, which says the advertiser
+// supports channel-selection algorithm #2; `tx_add` and `rx_add` are
+// the address-type bits, and which addresses they qualify depends on
+// the PDU type.
+//
+// The shorter name `LlAdvHeader` is the reference controller's, for the
+// raw two-byte pair rather than for this decoded one, and a type's
+// identity is its NAME across a whole assembly — so a program holding
+// both would be refused.  The reference's copy is one of the things the
+// split deletes; the longer name is what makes the two coexist until
+// then.
+pub struct LlAdvPduHeader
+    pdu_type: LlAdvType
+    channel_selection: Bool
+    tx_add: Bool
+    rx_add: Bool
+    length: Int
+
+// The largest advertising payload an uncoded PHY carries (§ 2.3).
+pub const ADV_PAYLOAD_MAX = 37
+
+// The advertising-channel PDUs this package codes (§ 2.3.1, § 2.3.2,
+// § 2.3.3).
+//
+// `LlAdvExtInd` keeps its payload as bytes: extended advertising's
+// Common Extended Advertising Payload is a format of its own with its
+// own optional-field bitmap, and a half-modelled version of it would be
+// worse than none.
+pub enum LlAdvPdu
+    // § 2.3.1.1 — connectable and scannable undirected advertising.
+    AdvInd(advertiser: LlAddress, data: [u8])
+    // § 2.3.1.2 — connectable directed advertising.  `high_duty` is
+    // carried by the advertising interval rather than by a bit, so it
+    // is not a field here; the two addresses are.
+    AdvDirectInd(advertiser: LlAddress, target: LlAddress)
+    // § 2.3.1.3 — non-connectable and non-scannable undirected.
+    AdvNonconnInd(advertiser: LlAddress, data: [u8])
+    // § 2.3.1.4 — scannable undirected.
+    AdvScanInd(advertiser: LlAddress, data: [u8])
+    // § 2.3.2.1 — a scanner asking for more.
+    ScanReq(scanner: LlAddress, advertiser: LlAddress)
+    // § 2.3.2.2 — the advertiser's answer.
+    ScanRsp(advertiser: LlAddress, data: [u8])
+    // § 2.3.3.1 — the packet that creates a connection.
+    ConnectInd(initiator: LlAddress, advertiser: LlAddress, payload: LlConnectIndPayload)
+    // § 2.3.4 — extended advertising, carried as its bytes.
+    AdvExtInd(payload: [u8])
+
+// The 22-byte LLData a CONNECT_IND carries after its two addresses
+// (§ 2.3.3.1) — the whole PDU payload is 34 bytes, of which 12 are
+// InitA and AdvA.
+//
+// Every field is in the specification's own units and none is converted
+// — `interval` is in 1.25 ms steps, `timeout` in 10 ms steps, and a
+// conversion to milliseconds here would lose the number the controller
+// programs its timer with.
+//
+// This value is the whole reason to have a link-layer codec as a
+// package.  In the reference controller the same bytes live at a fixed
+// RAM address that a second subsystem also claims, so staging a fresh
+// connection can overwrite live key material; a payload that is a VALUE
+// the caller holds has nowhere to collide with.
+pub struct LlConnectIndPayload
+    access_address: Int
+    crc_init: Int
+    window_size: Int
+    window_offset: Int
+    interval: Int
+    latency: Int
+    timeout: Int
+    channel_map: LlChannelMap
+    hop_increment: Int
+    sleep_clock_accuracy: Int
+
+// The advertising PDU as its wire bytes, header included.
+pub fn encode_adv_pdu(pdu: LlAdvPdu) -> [u8]
+    todo("ble_link.encode_adv_pdu")
+
+// Read an advertising PDU from the bytes a radio received.
+//
+// `bytes` starts at the two header bytes and does not include the
+// access address, the preamble or the CRC — those are the radio's, and
+// on every controller worth the name the hardware has already stripped
+// them.
+pub fn decode_adv_pdu(bytes: [u8]) -> Result<LlAdvPdu, LlError>
+    todo("ble_link.decode_adv_pdu")
+
+// The header of an advertising PDU, without decoding its payload.
+//
+// What a receive path calls first: the type and the length decide
+// whether the rest is worth reading, and on a device that decision
+// happens before the payload has finished arriving.
+pub fn decode_adv_header(bytes: [u8]) -> Result<LlAdvPduHeader, LlError>
+    todo("ble_link.decode_adv_header")
+
+// The two header bytes for a PDU type, its flags and its length.
+pub fn encode_adv_header(header: LlAdvPduHeader) -> [u8]
+    todo("ble_link.encode_adv_header")
+
+// The four-bit code an advertising PDU type is.
+pub fn adv_type_code(pdu_type: LlAdvType) -> Int
+    todo("ble_link.adv_type_code")
+
+// The type a four-bit code names.  Total: a reserved code keeps its
+// number rather than being dropped.
+pub fn adv_type_of(code: Int) -> LlAdvType
+    todo("ble_link.adv_type_of")
+
+// The type of PDU a value is, without matching every variant.
+pub fn adv_pdu_type(pdu: LlAdvPdu) -> LlAdvType
+    todo("ble_link.adv_pdu_type")
+
+// The CONNECT_IND's LLData as its 22 wire bytes (§ 2.3.3.1).
+pub fn encode_connect_ind_payload(payload: LlConnectIndPayload) -> [u8]
+    todo("ble_link.encode_connect_ind_payload")
+
+// Read a CONNECT_IND's LLData from the 22 bytes after the addresses.
+pub fn decode_connect_ind_payload(bytes: [u8]) -> Result<LlConnectIndPayload, LlError>
+    todo("ble_link.decode_connect_ind_payload")
+
+// ── AD structures (Core Spec Supplement Part A § 1) ─────────────────
+
+// One AD structure: a type byte and its data.
+//
+// The length byte is not a field, because it is `data`'s length plus
+// one and a struct that carried both could disagree with itself.
+pub struct AdStructure
+    ad_type: Int
+    data: [u8]
+
+// Flags — the discoverability bits and the BR/EDR-not-supported bit.
+pub const AD_FLAGS = 0x01
+
+// Incomplete list of 16-bit service UUIDs.
+pub const AD_INCOMPLETE_UUID16 = 0x02
+
+// Complete list of 16-bit service UUIDs.
+pub const AD_COMPLETE_UUID16 = 0x03
+
+// Incomplete list of 128-bit service UUIDs.
+pub const AD_INCOMPLETE_UUID128 = 0x06
+
+// Complete list of 128-bit service UUIDs.
+pub const AD_COMPLETE_UUID128 = 0x07
+
+// Shortened local name.
+pub const AD_SHORTENED_LOCAL_NAME = 0x08
+
+// Complete local name.
+pub const AD_COMPLETE_LOCAL_NAME = 0x09
+
+// TX power level, in dBm as a signed byte.
+pub const AD_TX_POWER_LEVEL = 0x0A
+
+// Service data for a 16-bit UUID.
+pub const AD_SERVICE_DATA_UUID16 = 0x16
+
+// Appearance.
+pub const AD_APPEARANCE = 0x19
+
+// Manufacturer-specific data, which begins with a company identifier.
+pub const AD_MANUFACTURER_SPECIFIC = 0xFF
+
+// The LE Limited Discoverable Mode flag.
+pub const AD_FLAG_LE_LIMITED_DISCOVERABLE = 0x01
+
+// The LE General Discoverable Mode flag.
+pub const AD_FLAG_LE_GENERAL_DISCOVERABLE = 0x02
+
+// The BR/EDR Not Supported flag, which every LE-only device sets.
+pub const AD_FLAG_BR_EDR_NOT_SUPPORTED = 0x04
+
+// The AD structures as the advertising data bytes: length, type, data,
+// repeated.
+pub fn encode_ad_structures(structures: [AdStructure]) -> [u8]
+    todo("ble_link.encode_ad_structures")
+
+// Read the AD structures out of advertising data.
+//
+// A length byte of zero ends the list, which is how a 31-byte buffer
+// padded with zeroes is read correctly; a length that runs past the
+// buffer is `LlBadAdStructure` and names the offset, because that is
+// the one piece of information a capture tool needs to show where the
+// data went wrong.
+//
+// ```novo
+// use ble_link
+//
+// fn main() [io]
+//     // Flags: LE General Discoverable, BR/EDR not supported.
+//     let data: [u8] = [0x02 as u8, 0x01 as u8, 0x06 as u8]
+//     match ble_link.decode_ad_structures(data)
+//         Err(e)  => println("bad advertising data: ${e.message()}")
+//         Ok(ads) =>
+//             match ble_link.find_ad_structure(ads, ble_link.AD_FLAGS)
+//                 None    => println("no flags")
+//                 Some(f) => println("flags: ${f.data[0] as Int}")
+// ```
+pub fn decode_ad_structures(data: [u8]) -> Result<[AdStructure], LlError>
+    todo("ble_link.decode_ad_structures")
+
+// The first structure of a type, or `None` when the data carries none.
+pub fn find_ad_structure(structures: [AdStructure], ad_type: Int) -> ?AdStructure
+    todo("ble_link.find_ad_structure")
+
+// ── Data-channel PDUs (§ 2.4) ───────────────────────────────────────
+
+// What a data-channel PDU's payload is (§ 2.4, the LLID field).
+pub enum LlDataKind
+    // 0b01 — a continuation fragment, or an empty PDU.
+    LlDataContinuation
+    // 0b10 — the start of an L2CAP message.
+    LlDataStart
+    // 0b11 — a control PDU.
+    LlDataControl
+    // 0b00 — reserved, and a packet that carries it is a fault.
+    LlDataReserved
+
+// The two-byte header of a data-channel PDU (§ 2.4).
+//
+// `next_expected_sequence` and `sequence` are the link layer's
+// one-bit-each acknowledgement scheme, and `more_data` is what keeps a
+// connection event open.  All three belong to the sender's state
+// machine and none of them is this package's to decide — a codec that
+// chose an SN would be a link layer.
+pub struct LlDataHeader
+    kind: LlDataKind
+    next_expected_sequence: Bool
+    sequence: Bool
+    more_data: Bool
+    length: Int
+
+// The largest data-channel payload a 4.0 controller carries (§ 2.4).
+//
+// 251 is the 4.2 Data Length Extension maximum; 27 is what a peer that
+// has not negotiated it must be assumed to accept.
+pub const DATA_PAYLOAD_DEFAULT_MAX = 27
+
+// The largest data-channel payload Data Length Extension allows.
+pub const DATA_PAYLOAD_MAX = 251
+
+// The two header bytes for a data-channel PDU.
+pub fn encode_data_header(header: LlDataHeader) -> [u8]
+    todo("ble_link.encode_data_header")
+
+// Read a data-channel PDU header.
+pub fn decode_data_header(bytes: [u8]) -> Result<LlDataHeader, LlError>
+    todo("ble_link.decode_data_header")
+
+// ── Control PDUs (§ 2.4.2) ──────────────────────────────────────────
+
+// A link-layer version: the specification number, the company that
+// implemented it, and that company's own subversion (§ 2.4.2.13).
+pub struct LlVersion
+    version_number: Int
+    company_identifier: Int
+    subversion_number: Int
+
+// The control PDUs a connected peripheral meets (§ 2.4.2).
+//
+// The set is the reference controller's plus the encryption pairs,
+// which is what a connection actually needs: parameters, features,
+// versions, channels, encryption and the two ways a link ends.  The
+// procedures that negotiate PHYs, lengths and connection parameters by
+// request are not here; the README says so.
+pub enum LlControlPdu
+    // § 2.4.2.1 — the central moves the connection to new parameters at
+    // `instant`, which is a connection-event count and not a time.
+    ConnectionUpdateInd(window_size: Int, window_offset: Int, interval: Int, latency: Int,
+                        timeout: Int, instant: Int)
+    // § 2.4.2.2 — a new data-channel map, also at an instant.
+    ChannelMapInd(channel_map: LlChannelMap, instant: Int)
+    // § 2.4.2.3 — this side is ending the connection, with a reason
+    // from the HCI error-code table.
+    TerminateInd(error_code: Int)
+    // § 2.4.2.4 — the central starts encryption: its half of the
+    // session-key diversifier and initialisation vector, plus the EDIV
+    // and Rand that name a stored long-term key.
+    EncReq(rand: [u8], ediv: Int, skd_central: [u8], iv_central: [u8])
+    // § 2.4.2.5 — the peripheral's half.
+    EncRsp(skd_peripheral: [u8], iv_peripheral: [u8])
+    // § 2.4.2.6 — the peripheral is ready to receive encrypted.
+    StartEncReq
+    // § 2.4.2.7 — sent encrypted, by each side in turn.
+    StartEncRsp
+    // § 2.4.2.8 — encryption is being suspended.
+    PauseEncReq
+    // § 2.4.2.9 — the answer to it.
+    PauseEncRsp
+    // § 2.4.2.10 — the peer sent an opcode this device does not know,
+    // and this quotes it back.
+    UnknownRsp(unknown_type: Int)
+    // § 2.4.2.11 — the central's feature set.
+    FeatureReq(feature_set: [u8])
+    // § 2.4.2.12 — the peer's feature set.
+    FeatureRsp(feature_set: [u8])
+    // § 2.4.2.13 — the version exchange, which each side may perform
+    // only once per connection.
+    VersionInd(version: LlVersion)
+    // § 2.4.2.14 — a procedure was refused, with an error code.
+    RejectInd(error_code: Int)
+    // § 2.4.2.15 — a peripheral offering its own feature set.
+    PeripheralFeatureReq(feature_set: [u8])
+
+// How many bytes a feature set is (§ 4.6).
+pub const FEATURE_SET_LEN = 8
+
+// The control PDU as its wire bytes: the opcode, then its parameters.
+//
+// The result is the PAYLOAD of a data-channel PDU whose header says
+// `LlDataControl`; `encode_data_header` writes that header.
+pub fn encode_control_pdu(pdu: LlControlPdu) -> [u8]
+    todo("ble_link.encode_control_pdu")
+
+// Read a control PDU from a data-channel payload.
+//
+// An opcode this package does not know is `LlUnknownControlOpcode`,
+// which carries the byte the peer is owed in an LL_UNKNOWN_RSP.
+pub fn decode_control_pdu(bytes: [u8]) -> Result<LlControlPdu, LlError>
+    todo("ble_link.decode_control_pdu")
+
+// The opcode byte a control PDU carries.
+pub fn control_opcode(pdu: LlControlPdu) -> Int
+    todo("ble_link.control_opcode")
+
+// ── The data-channel map (§ 4.5.8.1) ────────────────────────────────
+
+// Which of the 37 data channels this connection uses.
+//
+// Five bytes, one bit per channel, bit 0 of byte 0 being channel 0.
+// The two selection algorithms both work over it, and both need the
+// same two facts — how many channels are used, and which used channel
+// is the n-th — which is why they are functions here rather than
+// inside each algorithm.
+pub struct LlChannelMap
+    mask: [u8]
+
+// How many data channels there are.
+pub const DATA_CHANNEL_COUNT = 37
+
+// How many bytes a channel map is.
+pub const CHANNEL_MAP_LEN = 5
+
+// A channel map from its five mask bytes.
+pub fn channel_map(mask: [u8]) -> Result<LlChannelMap, LlError>
+    todo("ble_link.channel_map")
+
+// A channel map with every data channel used.
+pub fn all_channels() -> LlChannelMap
+    todo("ble_link.all_channels")
+
+// Whether a channel index is in the map.
+pub fn channel_used(map: LlChannelMap, index: Int) -> Bool
+    todo("ble_link.channel_used")
+
+// How many channels the map uses.
+//
+// A map that uses none is `LlNoChannelUsed` at selection time rather
+// than here, because counting a bad map is a perfectly good thing to
+// do — it is what tells a caller the map is bad.
+pub fn used_channel_count(map: LlChannelMap) -> Int
+    todo("ble_link.used_channel_count")
+
+// The `n`-th used channel, counting from zero.
+//
+// The remapping table of § 4.5.8.2, computed rather than stored: both
+// selection algorithms land on an unmapped channel and then need this.
+pub fn used_channel_at(map: LlChannelMap, n: Int) -> Result<Int, LlError>
+    todo("ble_link.used_channel_at")
+
+// ── Errors ──────────────────────────────────────────────────────────
+
+// Why a packet could not be read.
+pub enum LlError
+    // Fewer bytes than the format's fixed part needs.
+    LlPduTooShort(have: Int, need: Int)
+    // The header's length field and the bytes present disagree.
+    LlLengthMismatch(declared: Int, actual: Int)
+    // An advertising payload longer than the 37 bytes § 2.3 allows.
+    LlAdvPayloadOverLimit(length: Int)
+    // An advertising PDU type that carries no format this package
+    // knows, in a position where the type decides the format.
+    LlUnsupportedAdvType(code: Int)
+    // A control opcode this package does not know.  The peer is owed an
+    // LL_UNKNOWN_RSP quoting this byte.
+    LlUnknownControlOpcode(opcode: Int)
+    // An AD structure whose length byte runs past the buffer, at this
+    // offset into the advertising data.
+    LlBadAdStructure(offset: Int)
+    // A channel map that is not five bytes, or a channel index outside
+    // 0 to 36.
+    LlChannelOutOfRange(index: Int)
+    // A selection asked of a map that uses no channel at all.  A
+    // connection in this state cannot pick a channel and must end.
+    LlNoChannelUsed
+    // An address that is not six bytes.
+    LlBadAddressLength(length: Int)
+
+// What went wrong, in words, for a caller that logs rather than
+// branches.
+//
+// `Result<_, LlError>` requires it: SPEC § 3.4 admits a `Result` error
+// type only if it implements `Error`.
+impl Error for LlError
+    fn message(self) -> Str
+        todo("ble_link.LlError.message")

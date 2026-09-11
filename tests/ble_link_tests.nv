@@ -1,0 +1,477 @@
+// tests/ble_link_tests.nv — the API tests, written against the
+// signatures.
+//
+// They COMPILE today and they FAIL at run, with `not implemented:
+// ble_link.<fn>` from the `todo()` that is each body.  That is the
+// expected state of an interface release: the compiler has checked
+// every signature, every type and every effect row, and nothing else
+// has been checked because there is nothing else yet.
+//
+// Every byte string here is Core Vol 6 Part B's, and the section is
+// named where it is not obvious: § 2.3 for the advertising header,
+// § 2.3.1.1 for ADV_IND, § 2.3.3.1 for CONNECT_IND, § 2.4 for the data
+// header and § 2.4.2 for the control PDUs.  The Core Specification
+// Supplement Part A § 1 is the AD structure list.
+
+use std.test
+use std.str
+use ble_link
+
+// C0:DE:AD:BE:EF:01 as a random address, LSB-first as the air carries
+// it.
+fn advertiser() -> LlAddress
+    LlAddress {
+        bytes: [0x01 as u8, 0xEF as u8, 0xBE as u8, 0xAD as u8, 0xDE as u8, 0xC0 as u8],
+        random: true }
+
+fn initiator() -> LlAddress
+    LlAddress {
+        bytes: [0x11 as u8, 0x22 as u8, 0x33 as u8, 0x44 as u8, 0x55 as u8, 0x66 as u8],
+        random: true }
+
+// Flags: LE General Discoverable, BR/EDR not supported.
+//
+//   02 01 06   length 2, type 0x01, value 0x06
+fn flags_ad() -> [u8]
+    [0x02 as u8, 0x01 as u8, 0x06 as u8]
+
+@test
+fn test_the_lengths_and_counts_are_the_specification_s()
+    // Real today: the constants are the one part of an interface that
+    // needs no body.
+    test.assert_eq(ble_link.ADDRESS_LEN, 6)
+    test.assert_eq(ble_link.ADV_PAYLOAD_MAX, 37)
+    test.assert_eq(ble_link.DATA_PAYLOAD_DEFAULT_MAX, 27)
+    test.assert_eq(ble_link.DATA_PAYLOAD_MAX, 251)
+    test.assert_eq(ble_link.DATA_CHANNEL_COUNT, 37)
+    test.assert_eq(ble_link.CHANNEL_MAP_LEN, 5)
+    test.assert_eq(ble_link.FEATURE_SET_LEN, 8)
+
+@test
+fn test_the_advertising_pdu_types_are_table_2_3()
+    test.assert_eq(ble_link.adv_type_code(LlAdvInd), 0x0)
+    test.assert_eq(ble_link.adv_type_code(LlAdvDirectInd), 0x1)
+    test.assert_eq(ble_link.adv_type_code(LlAdvNonconnInd), 0x2)
+    test.assert_eq(ble_link.adv_type_code(LlScanReq), 0x3)
+    test.assert_eq(ble_link.adv_type_code(LlScanRsp), 0x4)
+    test.assert_eq(ble_link.adv_type_code(LlConnectInd), 0x5)
+    test.assert_eq(ble_link.adv_type_code(LlAdvScanInd), 0x6)
+    test.assert_eq(ble_link.adv_type_code(LlAdvExtInd), 0x7)
+
+@test
+fn test_a_reserved_pdu_type_keeps_its_number()
+    // A capture tool has to be able to say what it saw, including a
+    // type this package does not code.
+    match ble_link.adv_type_of(0xC)
+        LlAdvReserved(code) => test.assert_eq(code, 0xC)
+        _                   => test.fail("0x8 to 0xF are reserved")
+    match ble_link.adv_type_of(0x5)
+        LlConnectInd => test.assert(true)
+        _            => test.fail("0x5 is CONNECT_IND")
+
+@test
+fn test_the_advertising_header_packs_its_four_fields()
+    // Byte 0 is [PduType(4) | RFU(1) | ChSel(1) | TxAdd(1) | RxAdd(1)]
+    // from the low bit up, so ADV_IND with a random TxAdd is 0x40.
+    let header = LlAdvPduHeader {
+        pdu_type: LlAdvInd,
+        channel_selection: false,
+        tx_add: true,
+        rx_add: false,
+        length: 9 }
+    let wire = ble_link.encode_adv_header(header)
+    test.assert_eq(list.len(wire), 2)
+    test.assert_eq(wire[0] as Int, 0x40)
+    test.assert_eq(wire[1] as Int, 9)
+
+@test
+fn test_the_channel_selection_bit_is_its_own_bit()
+    // ChSel is bit 5: an advertiser that supports algorithm #2 sets it
+    // without touching the address bits.
+    let header = LlAdvPduHeader {
+        pdu_type: LlAdvInd,
+        channel_selection: true,
+        tx_add: true,
+        rx_add: false,
+        length: 9 }
+    let wire = ble_link.encode_adv_header(header)
+    test.assert_eq(wire[0] as Int, 0x60)
+
+@test
+fn test_an_advertising_header_round_trips()
+    // 0x65 is 0110 0101: type 0x5, ChSel set, TxAdd set, RxAdd clear.
+    let header: [u8] = [0x65 as u8, 0x22 as u8]
+    match ble_link.decode_adv_header(header)
+        Err(_)   => test.fail("two bytes are one whole advertising header")
+        Ok(back) =>
+            match back.pdu_type
+                LlConnectInd => test.assert(true)
+                _            => test.fail("the low nibble 0x5 is CONNECT_IND")
+            test.assert(back.tx_add)
+            test.assert(not back.rx_add)
+            test.assert(back.channel_selection)
+            test.assert_eq(back.length, 0x22)
+
+@test
+fn test_an_adv_ind_is_its_header_its_address_and_its_data()
+    let pdu = AdvInd(advertiser(), flags_ad())
+    let wire = ble_link.encode_adv_pdu(pdu)
+    // 2 header + 6 address + 3 data.
+    test.assert_eq(list.len(wire), 11)
+    test.assert_eq(wire[0] as Int, 0x40)   // ADV_IND, TxAdd random
+    test.assert_eq(wire[1] as Int, 9)   // payload length
+    test.assert_eq(wire[2] as Int, 0x01)   // AdvA, LSB first
+    test.assert_eq(wire[7] as Int, 0x01)   // the flags AD's length byte
+    match ble_link.adv_pdu_type(pdu)
+        LlAdvInd => test.assert(true)
+        _        => test.fail("an AdvInd is an ADV_IND")
+
+@test
+fn test_an_adv_ind_round_trips()
+    let wire = ble_link.encode_adv_pdu(AdvInd(advertiser(), flags_ad()))
+    match ble_link.decode_adv_pdu(wire)
+        Err(_)  => test.fail("what encode wrote, decode reads")
+        Ok(pdu) =>
+            match pdu
+                AdvInd(who, data) =>
+                    test.assert(who.random)
+                    test.assert_eq(list.len(who.bytes), 6)
+                    test.assert_eq(list.len(data), 3)
+                _                 => test.fail("0x0 is ADV_IND")
+
+@test
+fn test_a_scan_req_carries_two_addresses_and_no_data()
+    let wire = ble_link.encode_adv_pdu(ScanReq(initiator(), advertiser()))
+    test.assert_eq(list.len(wire), 14)   // 2 header + 6 + 6
+    test.assert_eq(wire[1] as Int, 12)
+
+@test
+fn test_an_advertising_payload_past_thirty_seven_bytes_is_refused()
+    var big: [u8] = []
+    for i in 0..40
+        big = list.append(big, [0x00 as u8])
+    match ble_link.decode_adv_pdu(list.append([0x00 as u8, 40 as u8], big))
+        Ok(_)  => test.fail("§ 2.3 caps an advertising payload at 37 bytes")
+        Err(e) =>
+            match e
+                LlAdvPayloadOverLimit(n) => test.assert_eq(n, 40)
+                _                        => test.fail("the refusal names the length")
+
+@test
+fn test_a_truncated_advertising_pdu_is_refused()
+    match ble_link.decode_adv_header([0x40 as u8])
+        Ok(_)  => test.fail("an advertising header is two bytes")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 2)
+                _                         => test.fail("a short buffer is LlPduTooShort")
+
+@test
+fn test_a_connect_ind_payload_is_twenty_two_bytes_in_spec_units()
+    let map = ble_link.all_channels()
+    let payload = LlConnectIndPayload {
+        access_address: 0x8E89BED6,
+        crc_init: 0x555555,
+        window_size: 2,
+        window_offset: 0,
+        interval: 24,   // 30 ms, in 1.25 ms steps
+        latency: 0,
+        timeout: 100,   // 1 s, in 10 ms steps
+        channel_map: map,
+        hop_increment: 5,
+        sleep_clock_accuracy: 0 }
+    let wire = ble_link.encode_connect_ind_payload(payload)
+    test.assert_eq(list.len(wire), 22)
+    test.assert_eq(wire[0] as Int, 0xD6)   // access address, LSB first
+    test.assert_eq(wire[3] as Int, 0x8E)
+    test.assert_eq(wire[7] as Int, 2)   // WinSize
+    test.assert_eq(wire[21] as Int, 5)   // Hop in the low five bits, SCA 0
+
+@test
+fn test_a_connect_ind_payload_round_trips()
+    let map = ble_link.all_channels()
+    let payload = LlConnectIndPayload {
+        access_address: 0x8E89BED6,
+        crc_init: 0x555555,
+        window_size: 2,
+        window_offset: 0,
+        interval: 24,
+        latency: 0,
+        timeout: 100,
+        channel_map: map,
+        hop_increment: 5,
+        sleep_clock_accuracy: 0 }
+    match ble_link.decode_connect_ind_payload(ble_link.encode_connect_ind_payload(payload))
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) =>
+            test.assert_eq(back.access_address, 0x8E89BED6)
+            test.assert_eq(back.interval, 24)
+            test.assert_eq(back.hop_increment, 5)
+
+@test
+fn test_a_connect_ind_carries_both_addresses_and_the_ll_data()
+    let map = ble_link.all_channels()
+    let payload = LlConnectIndPayload {
+        access_address: 0x8E89BED6,
+        crc_init: 0x555555,
+        window_size: 2,
+        window_offset: 0,
+        interval: 24,
+        latency: 0,
+        timeout: 100,
+        channel_map: map,
+        hop_increment: 5,
+        sleep_clock_accuracy: 0 }
+    let wire = ble_link.encode_adv_pdu(ConnectInd(initiator(), advertiser(), payload))
+    test.assert_eq(list.len(wire), 36)   // 2 header + 6 + 6 + 22
+    test.assert_eq(wire[1] as Int, 34)
+
+@test
+fn test_the_ad_type_numbers_are_the_supplement_s()
+    test.assert_eq(ble_link.AD_FLAGS, 0x01)
+    test.assert_eq(ble_link.AD_COMPLETE_UUID16, 0x03)
+    test.assert_eq(ble_link.AD_COMPLETE_LOCAL_NAME, 0x09)
+    test.assert_eq(ble_link.AD_TX_POWER_LEVEL, 0x0A)
+    test.assert_eq(ble_link.AD_SERVICE_DATA_UUID16, 0x16)
+    test.assert_eq(ble_link.AD_MANUFACTURER_SPECIFIC, 0xFF)
+    test.assert_eq(ble_link.AD_FLAG_LE_GENERAL_DISCOVERABLE, 0x02)
+    test.assert_eq(ble_link.AD_FLAG_BR_EDR_NOT_SUPPORTED, 0x04)
+
+@test
+fn test_an_ad_structure_list_is_length_type_data_repeated()
+    let structures = [AdStructure { ad_type: 0x01, data: [0x06 as u8] },
+                      AdStructure { ad_type: 0x09, data: [0x6E as u8, 0x76 as u8] }]
+    let wire = ble_link.encode_ad_structures(structures)
+    test.assert_eq(list.len(wire), 7)
+    test.assert_eq(wire[0] as Int, 0x02)   // length: type byte + one
+    test.assert_eq(wire[1] as Int, 0x01)
+    test.assert_eq(wire[2] as Int, 0x06)
+    test.assert_eq(wire[3] as Int, 0x03)   // length: type byte + two
+    test.assert_eq(wire[4] as Int, 0x09)
+
+@test
+fn test_a_zero_length_byte_ends_the_list()
+    // A 31-byte advertising buffer padded with zeroes: the padding is
+    // the terminator and not thirty structures of type zero.
+    let padded: [u8] = [0x02 as u8, 0x01 as u8, 0x06 as u8,
+                        0x00 as u8, 0x00 as u8, 0x00 as u8]
+    match ble_link.decode_ad_structures(padded)
+        Err(_)         => test.fail("three bytes of data and three of padding")
+        Ok(structures) =>
+            test.assert_eq(list.len(structures), 1)
+            test.assert_eq(structures[0].ad_type, 0x01)
+
+@test
+fn test_a_length_byte_that_runs_off_the_end_names_its_offset()
+    // Length 9 with three bytes left.  A capture tool needs the offset
+    // to show where the data went wrong.
+    match ble_link.decode_ad_structures([0x09 as u8, 0x01 as u8, 0x06 as u8])
+        Ok(_)  => test.fail("a length of 9 needs nine more bytes")
+        Err(e) =>
+            match e
+                LlBadAdStructure(offset) => test.assert_eq(offset, 0)
+                _                        => test.fail("the refusal names the offset")
+
+@test
+fn test_a_structure_is_found_by_its_type()
+    let structures = [AdStructure { ad_type: 0x01, data: [0x06 as u8] },
+                      AdStructure { ad_type: 0x09, data: [0x6E as u8, 0x76 as u8] }]
+    match ble_link.find_ad_structure(structures, 0x09)
+        None    => test.fail("the complete local name is in this list")
+        Some(s) => test.assert_eq(list.len(s.data), 2)
+    match ble_link.find_ad_structure(structures, 0xFF)
+        None    => test.assert(true)
+        Some(_) => test.fail("there is no manufacturer data here")
+
+@test
+fn test_a_data_channel_header_is_llid_three_flags_and_a_length()
+    // LLID 0b11 with no flags set and a one-byte payload is 03 01 —
+    // which is an LL_TERMINATE_IND's header before its opcode.
+    let header = LlDataHeader {
+        kind: LlDataControl,
+        next_expected_sequence: false,
+        sequence: false,
+        more_data: false,
+        length: 2 }
+    let wire = ble_link.encode_data_header(header)
+    test.assert_eq(list.len(wire), 2)
+    test.assert_eq(wire[0] as Int, 0x03)
+    test.assert_eq(wire[1] as Int, 2)
+
+@test
+fn test_the_start_of_an_l2cap_message_is_llid_two()
+    match ble_link.decode_data_header([0x02 as u8, 0x07 as u8])
+        Err(_)   => test.fail("two bytes are one whole data header")
+        Ok(back) =>
+            match back.kind
+                LlDataStart => test.assert(true)
+                _           => test.fail("0b10 starts an L2CAP message")
+            test.assert_eq(back.length, 7)
+    match ble_link.decode_data_header([0x01 as u8, 0x00 as u8])
+        Err(_)   => test.fail("an empty PDU is a legal packet")
+        Ok(back) =>
+            match back.kind
+                LlDataContinuation => test.assert(true)
+                _                  => test.fail("0b01 continues one")
+
+@test
+fn test_a_reserved_llid_is_reported_rather_than_guessed()
+    match ble_link.decode_data_header([0x00 as u8, 0x00 as u8])
+        Err(_)   => test.fail("a reserved LLID is a packet that arrived")
+        Ok(back) =>
+            match back.kind
+                LlDataReserved => test.assert(true)
+                _              => test.fail("0b00 is reserved")
+
+@test
+fn test_the_control_opcodes_are_the_specification_s()
+    test.assert_eq(ble_link.control_opcode(ConnectionUpdateInd(2, 0, 24, 0, 100, 42)), 0x00)
+    test.assert_eq(ble_link.control_opcode(TerminateInd(0x13)), 0x02)
+    test.assert_eq(ble_link.control_opcode(StartEncReq), 0x05)
+    test.assert_eq(ble_link.control_opcode(StartEncRsp), 0x06)
+    test.assert_eq(ble_link.control_opcode(UnknownRsp(0x20)), 0x07)
+    test.assert_eq(ble_link.control_opcode(PauseEncReq), 0x0A)
+    test.assert_eq(ble_link.control_opcode(PauseEncRsp), 0x0B)
+
+@test
+fn test_a_version_ind_is_five_parameter_bytes()
+    // 0C 0A 3F 00 00 01 — LL_VERSION_IND, VersNr 0x0A (5.1),
+    // CompId 0x003F, SubVersNr 0x0100.
+    let version = LlVersion {
+        version_number: 0x0A,
+        company_identifier: 0x003F,
+        subversion_number: 0x0100 }
+    let wire = ble_link.encode_control_pdu(VersionInd(version))
+    test.assert_eq(list.len(wire), 6)
+    test.assert_eq(wire[0] as Int, 0x0C)
+    test.assert_eq(wire[1] as Int, 0x0A)
+    test.assert_eq(wire[2] as Int, 0x3F)   // CompId, LSB first
+    test.assert_eq(wire[3] as Int, 0x00)
+    test.assert_eq(wire[4] as Int, 0x00)   // SubVersNr, LSB first
+    test.assert_eq(wire[5] as Int, 0x01)
+
+@test
+fn test_a_version_ind_round_trips()
+    let version = LlVersion {
+        version_number: 0x0A,
+        company_identifier: 0x003F,
+        subversion_number: 0x0100 }
+    match ble_link.decode_control_pdu(ble_link.encode_control_pdu(VersionInd(version)))
+        Err(_)  => test.fail("what encode wrote, decode reads")
+        Ok(pdu) =>
+            match pdu
+                VersionInd(v) =>
+                    test.assert_eq(v.version_number, 0x0A)
+                    test.assert_eq(v.company_identifier, 0x003F)
+                _             => test.fail("0x0C is LL_VERSION_IND")
+
+@test
+fn test_a_feature_exchange_is_eight_bytes_each_way()
+    let features: [u8] = [0x01 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8,
+                          0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8]
+    let request = ble_link.encode_control_pdu(FeatureReq(features))
+    test.assert_eq(list.len(request), 9)
+    test.assert_eq(request[0] as Int, 0x08)
+    let response = ble_link.encode_control_pdu(FeatureRsp(features))
+    test.assert_eq(response[0] as Int, 0x09)
+    // The peripheral's own request is a third opcode, and a stack that
+    // answered it as 0x08 would be answering the wrong procedure.
+    test.assert_eq(ble_link.control_opcode(PeripheralFeatureReq(features)), 0x0E)
+
+@test
+fn test_the_encryption_start_pair_carries_the_two_halves()
+    // LL_ENC_REQ is Rand(8), EDIV(2), SKDm(8), IVm(4) after its opcode.
+    let nonce: [u8] = [0x01 as u8, 0x02 as u8, 0x03 as u8, 0x04 as u8,
+                       0x05 as u8, 0x06 as u8, 0x07 as u8, 0x08 as u8]
+    let skd: [u8] = [0x11 as u8, 0x12 as u8, 0x13 as u8, 0x14 as u8,
+                     0x15 as u8, 0x16 as u8, 0x17 as u8, 0x18 as u8]
+    let iv: [u8] = [0x21 as u8, 0x22 as u8, 0x23 as u8, 0x24 as u8]
+    let wire = ble_link.encode_control_pdu(EncReq(nonce, 0x1234, skd, iv))
+    test.assert_eq(list.len(wire), 23)
+    test.assert_eq(wire[0] as Int, 0x03)
+    // LL_ENC_RSP is the peripheral's SKD and IV and nothing else.
+    let answer = ble_link.encode_control_pdu(EncRsp(skd, iv))
+    test.assert_eq(list.len(answer), 13)
+    test.assert_eq(answer[0] as Int, 0x04)
+
+@test
+fn test_the_encryption_pause_pair_is_two_bare_opcodes()
+    test.assert_eq(list.len(ble_link.encode_control_pdu(PauseEncReq)), 1)
+    test.assert_eq(list.len(ble_link.encode_control_pdu(PauseEncRsp)), 1)
+
+@test
+fn test_a_channel_map_update_carries_an_instant_and_not_a_time()
+    let map = ble_link.all_channels()
+    let wire = ble_link.encode_control_pdu(ChannelMapInd(map, 0x0064))
+    test.assert_eq(list.len(wire), 8)   // opcode + 5 + 2
+    test.assert_eq(wire[0] as Int, 0x01)
+    test.assert_eq(wire[6] as Int, 0x64)   // instant, LSB first
+    test.assert_eq(wire[7] as Int, 0x00)
+
+@test
+fn test_a_connection_update_is_six_fields_and_an_instant()
+    let wire = ble_link.encode_control_pdu(ConnectionUpdateInd(2, 6, 24, 0, 100, 0x0064))
+    test.assert_eq(list.len(wire), 12)
+    test.assert_eq(wire[0] as Int, 0x00)
+    test.assert_eq(wire[1] as Int, 2)   // WinSize
+    test.assert_eq(wire[2] as Int, 6)   // WinOffset, LSB first
+    test.assert_eq(wire[10] as Int, 0x64)   // Instant, LSB first
+
+@test
+fn test_a_terminate_and_a_reject_each_carry_one_error_code()
+    let terminate = ble_link.encode_control_pdu(TerminateInd(0x13))
+    test.assert_eq(list.len(terminate), 2)
+    test.assert_eq(terminate[1] as Int, 0x13)
+    let reject = ble_link.encode_control_pdu(RejectInd(0x1A))
+    test.assert_eq(reject[0] as Int, 0x0D)
+
+@test
+fn test_an_unknown_control_opcode_is_the_byte_the_peer_is_owed()
+    // 0x7F is not a control opcode.  The peer is owed an
+    // LL_UNKNOWN_RSP quoting it, and the refusal is where that byte
+    // comes from.
+    match ble_link.decode_control_pdu([0x7F as u8])
+        Ok(_)  => test.fail("0x7F is not a control opcode")
+        Err(e) =>
+            match e
+                LlUnknownControlOpcode(op) => test.assert_eq(op, 0x7F)
+                _                          => test.fail("the refusal names the opcode")
+
+@test
+fn test_a_channel_map_is_five_bytes_and_thirty_seven_bits()
+    // All 37 channels: FF FF FF FF 1F — the top three bits of the last
+    // byte are not channels.
+    match ble_link.channel_map([0xFF as u8, 0xFF as u8, 0xFF as u8, 0xFF as u8, 0x1F as u8])
+        Err(_)  => test.fail("five bytes are a channel map")
+        Ok(map) =>
+            test.assert_eq(ble_link.used_channel_count(map), 37)
+            test.assert(ble_link.channel_used(map, 0))
+            test.assert(ble_link.channel_used(map, 36))
+
+@test
+fn test_a_map_of_the_wrong_width_is_refused()
+    match ble_link.channel_map([0xFF as u8, 0xFF as u8])
+        Ok(_)  => test.fail("a channel map is five bytes and no other number")
+        Err(_) => test.assert(true)
+
+@test
+fn test_a_sparse_map_renumbers_its_used_channels()
+    // Channels 0, 1, 2 and 36 only: 07 00 00 00 10.
+    match ble_link.channel_map([0x07 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8, 0x10 as u8])
+        Err(_)  => test.fail("five bytes are a channel map")
+        Ok(map) =>
+            test.assert_eq(ble_link.used_channel_count(map), 4)
+            test.assert(not ble_link.channel_used(map, 3))
+            match ble_link.used_channel_at(map, 3)
+                Err(_) => test.fail("the fourth used channel is 36")
+                Ok(ch) => test.assert_eq(ch, 36)
+            match ble_link.used_channel_at(map, 4)
+                Ok(_)  => test.fail("this map uses four channels, not five")
+                Err(_) => test.assert(true)
+
+@test
+fn test_an_error_says_what_went_wrong_in_words()
+    let e = LlUnknownControlOpcode(0x7F)
+    test.assert(str.len(e.message()) > 0)

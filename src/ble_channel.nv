@@ -1,0 +1,85 @@
+// ble_channel — the two channel-selection algorithms, Core Vol 6
+// Part B § 4.5.8.
+//
+// Every body is a `todo()`.  The signatures are the design; see the
+// README for the stamp.
+//
+// A connection hops.  Which of the 37 data channels a connection event
+// uses is decided by an algorithm both sides run independently, and it
+// has to produce the same answer on both without a message passing —
+// which is exactly the kind of thing that belongs in a package with
+// test vectors rather than in a controller with a radio attached.
+//
+// Both algorithms are PURE FUNCTIONS of values the caller already has:
+// the previous channel or the event counter, the channel map, and for
+// #2 an identifier derived from the access address.  Nothing here
+// consults a clock, and nothing here is a state machine — the caller
+// holds the event counter, because the caller is the thing counting
+// events.
+
+// `LlChannelMap` and `LlError` are `ble_link`'s.  There is no `use`
+// line because nothing here calls that module's functions, and a type's
+// identity is its NAME across the whole assembly.
+
+// ── Channel selection #1 (§ 4.5.8.2) ────────────────────────────────
+
+// The next data channel, by the algorithm every LE device implements.
+//
+//     unmapped = (previous + hop_increment) mod 37
+//
+// and if that channel is not in the map, the remapping table's
+// `unmapped mod used_count`-th used channel instead.
+//
+// `hop_increment` is the CONNECT_IND's, a value from 5 to 16, and it is
+// an argument rather than state because it belongs to the connection
+// and this package holds no connection.  A map that uses no channel is
+// `LlNoChannelUsed`: there is no answer, and returning channel 0 would
+// be a connection quietly transmitting where it was told not to.
+//
+// ```novo
+// use ble_channel
+// use ble_link
+//
+// fn main() [io]
+//     let map = ble_link.all_channels()
+//     match ble_channel.next_channel_csa1(35, 5, map)
+//         Err(e) => println("no channel: ${e.message()}")
+//         Ok(ch) => println("channel ${ch}")   // 3: 40 mod 37
+// ```
+pub fn next_channel_csa1(previous: Int, hop_increment: Int,
+                         map: LlChannelMap) -> Result<Int, LlError>
+    todo("ble_channel.next_channel_csa1")
+
+// ── Channel selection #2 (§ 4.5.8.3) ────────────────────────────────
+
+// The channel identifier a connection's access address gives
+// (§ 4.5.8.3.1).
+//
+//     channel_identifier = (access_address >> 16) xor (access_address & 0xFFFF)
+//
+// Constant for the life of a connection, which is why it is computed
+// once and passed in rather than recomputed per event.
+pub fn channel_identifier(access_address: Int) -> Int
+    todo("ble_channel.channel_identifier")
+
+// The data channel for an event, by algorithm #2.
+//
+// Unlike #1 this does not depend on the previous channel: it is a
+// function of the event counter alone, so a device that slept through
+// forty events computes the right channel for the forty-first without
+// iterating.  That is the property the algorithm exists for, and it is
+// why `latency` on a peripheral is affordable.
+//
+// The permutation and the multiply-add of § 4.5.8.3.3 are the whole of
+// it; the Core Specification's § 4.5.8.3.5 sample data is the test.
+pub fn channel_csa2(event_counter: Int, channel_identifier: Int,
+                    map: LlChannelMap) -> Result<Int, LlError>
+    todo("ble_channel.channel_csa2")
+
+// The unmapped channel #2 lands on, before the map is consulted.
+//
+// Exposed because it is the half of the algorithm the Core
+// Specification gives sample values for, and a conformance harness that
+// could only check the final answer could not say which half was wrong.
+pub fn unmapped_channel_csa2(event_counter: Int, channel_identifier: Int) -> Int
+    todo("ble_channel.unmapped_channel_csa2")

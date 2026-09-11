@@ -1,0 +1,116 @@
+// tests/embedded_probe.nv — the package's device claim, as a program
+// that either builds for a Cortex-M or does not.
+//
+// The shard audit's `core-embedded` row copies this and the modules its
+// `use` lines reach into a package of their own and runs
+//
+//   novo build --target=nrf52-qemu src/probe.nv
+//
+// which produces a real Cortex-M4 ELF or fails.  For the link layer the
+// claim is not optional: this code's only production home is a
+// controller, and a link-layer codec that did not compile for one would
+// be a library about radios for machines that have none.
+//
+// It BUILDS; it does not run.  Every function it calls is a `todo()`
+// today, so a device that executed this would panic on the first line
+// of `main`.  What is being checked is the TIER: `--target=nrf52-qemu`
+// stamps `@tier(embedded)` on every function it compiles, so the
+// checker walks the module and refuses a `Str` concatenation, a `Bytes`
+// call or an unbounded `while` wherever the implementation later puts
+// one.
+//
+// WHERE THE BYTES COME FROM.  At `@tier(embedded)` a list literal is an
+// implicit heap allocation, a boxed struct literal is a heap cell, and
+// a payload-carrying enum variant is a heap cell too — so a probe
+// cannot write a packet down.  On a device it does not have to: the
+// bytes arrive from the radio's receive buffer and the values arrive
+// from the connection.  `received` and `connection_map` stand where
+// that arrival is; their bodies are `todo()` like everything else here.
+
+use ble_link
+use ble_channel
+
+// The bytes the radio put in its receive buffer, header included.
+fn received() -> [u8]
+    todo("probe.received")
+
+// The channel map this connection is using, as the CONNECT_IND set it.
+fn connection_map() -> LlChannelMap
+    todo("probe.connection_map")
+
+fn main() [hw, time]
+    // The receive path's first decision: what arrived and how long is
+    // it.  On a device this happens before the payload has finished
+    // arriving, which is why the header decodes on its own.
+    match ble_link.decode_adv_header(received())
+        Err(_)  => hal.uart.write("ble-link: bad header\n")
+        Ok(hdr) =>
+            match hdr.pdu_type
+                LlAdvInd         => hal.uart.write("ble-link: adv_ind\n")
+                LlConnectInd     => hal.uart.write("ble-link: connect_ind\n")
+                LlScanReq        => hal.uart.write("ble-link: scan_req\n")
+                LlAdvReserved(_) => hal.uart.write("ble-link: reserved\n")
+                _                => hal.uart.write("ble-link: other\n")
+            if hdr.length > ble_link.ADV_PAYLOAD_MAX
+                hal.uart.write("ble-link: oversize\n")
+
+    // One whole advertising PDU, so the Result-returning half of the
+    // surface is compiled for the device too.
+    let adv: Result<LlAdvPdu, LlError> = ble_link.decode_adv_pdu(received())
+    match adv
+        Err(_)  => hal.uart.write("ble-link: bad pdu\n")
+        Ok(pdu) =>
+            match ble_link.adv_pdu_type(pdu)
+                LlAdvInd => hal.uart.write("ble-link: advertising\n")
+                _        => hal.uart.write("ble-link: something else\n")
+
+    // The CONNECT_IND payload as a VALUE.  This is the shape the whole
+    // package exists for: the staged connection parameters are held by
+    // whoever decoded them and are nowhere in particular, so nothing
+    // else can claim the same bytes.
+    match ble_link.decode_connect_ind_payload(received())
+        Err(_)  => hal.uart.write("ble-link: bad connect_ind\n")
+        Ok(par) =>
+            if par.interval > 0 and par.hop_increment >= 5
+                hal.uart.write("ble-link: connectable\n")
+
+    // The data-channel header, which a connection event reads twice.
+    match ble_link.decode_data_header(received())
+        Err(_)  => hal.uart.write("ble-link: bad data header\n")
+        Ok(hdr) =>
+            match hdr.kind
+                LlDataStart        => hal.uart.write("ble-link: l2cap start\n")
+                LlDataContinuation => hal.uart.write("ble-link: l2cap more\n")
+                LlDataControl      => hal.uart.write("ble-link: control\n")
+                LlDataReserved     => hal.uart.write("ble-link: reserved llid\n")
+
+    // A control PDU, which is the other thing a connection event
+    // carries.
+    match ble_link.decode_control_pdu(received())
+        Err(_) => hal.uart.write("ble-link: unknown control\n")
+        Ok(_)  => hal.uart.write("ble-link: control pdu\n")
+
+    // The AD structures, which a scanner walks for every packet it
+    // hears.
+    match ble_link.decode_ad_structures(received())
+        Err(_)  => hal.uart.write("ble-link: bad ad data\n")
+        Ok(ads) =>
+            match ble_link.find_ad_structure(ads, ble_link.AD_COMPLETE_LOCAL_NAME)
+                None    => hal.uart.write("ble-link: no name\n")
+                Some(_) => hal.uart.write("ble-link: named\n")
+
+    // And the channel arithmetic, which runs once per connection event
+    // and is the reason the map has its own accessors.
+    let map = connection_map()
+    if ble_link.used_channel_count(map) == ble_link.DATA_CHANNEL_COUNT
+        hal.uart.write("ble-link: all channels\n")
+    match ble_channel.next_channel_csa1(0, 5, map)
+        Err(_) => hal.uart.write("ble-link: no channel\n")
+        Ok(_)  => hal.uart.write("ble-link: hopped\n")
+    let identifier = ble_channel.channel_identifier(0x8E89BED6)
+    match ble_channel.channel_csa2(1, identifier, map)
+        Err(_) => hal.uart.write("ble-link: no channel\n")
+        Ok(_)  => hal.uart.write("ble-link: selected\n")
+
+    loop
+        core.rt.sleep_ms(1000)
