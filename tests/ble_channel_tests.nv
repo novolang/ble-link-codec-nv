@@ -1,9 +1,6 @@
 // tests/ble_channel_tests.nv — the API tests for the two selection
 // algorithms, written against the signatures.
 //
-// They COMPILE today and they FAIL at run, with `not implemented:
-// ble_channel.<fn>` from the `todo()` that is each body.
-//
 // The reference is Core Vol 6 Part B § 4.5.8.  Two kinds of assertion
 // are here and the difference matters:
 //

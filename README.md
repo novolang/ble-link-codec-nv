@@ -11,12 +11,6 @@ which is [hci-codec-nv](https://novo-lang.org/packages/hci-codec-nv).
 This package is for the programs on the other side of that interface: a
 controller's own firmware, and a sniffer reading the air.
 
-**Status: NOT IMPLEMENTED — interface only.** Every function is declared
-with its full signature, but every body is a `todo()` that panics when
-called. The package is published so its design can be reviewed and
-depended on before it is implemented. Version 0.1.0 will be the first
-working release.
-
 ## What the link layer is
 
 An LE radio uses 40 channels. Three of them are **advertising
@@ -134,11 +128,6 @@ fn main() [io]
         Err(e) => println("this connection has no channel left: ${e.message()}")
         Ok(ch) => println("the next event is on channel ${ch}")
 ```
-
-Build and test with `novo pkg build` and `novo test`. Today `novo test`
-fails on purpose: every test reaches a `not implemented: ble_link.<fn>`
-panic. The tests are the specification the implementation will have to
-satisfy.
 
 ## What the package contains
 
@@ -290,6 +279,7 @@ take.
 ```bash
 novo test tests/ble_link_tests.nv       # 36 tests against the signatures
 novo test tests/ble_channel_tests.nv    # 9 tests over the two algorithms
+novo test tests/ble_link_edge_tests.nv  # 27 tests over the paths the API suite does not reach
 ```
 
 The byte strings the suite asserts against are the Bluetooth Core
@@ -308,28 +298,13 @@ the map does not use, and algorithm #2's channel identifier. It does not
 write down the section 4.5.8.3.5 sample channel table, which is numbers
 rather than a formula. What it asserts instead is the property every
 answer must have whatever that table says: a channel from 0 to 36 that
-the map actually uses. The implementation transcribes the table from the
-Core Specification.
+the map actually uses. The implementation was written against that
+table: the sample values it gives are what fixed the algorithm's shape.
 
-The tests compile today and fail at run, each on the `not implemented`
-panic that is its body. That is the expected state of an interface
-release. They turn green one at a time as bodies land.
-
-## Implementation status
-
-| Item | Implemented |
-| --- | --- |
-| The `AD_*`, `ADDRESS_LEN`, `*_PAYLOAD_*`, `DATA_CHANNEL_COUNT`, `CHANNEL_MAP_LEN` and `FEATURE_SET_LEN` constants | yes (they are constants) |
-| `ble_link.encode_adv_pdu`, `.decode_adv_pdu`, `.adv_pdu_type` | no |
-| `ble_link.encode_adv_header`, `.decode_adv_header`, `.adv_type_code`, `.adv_type_of` | no |
-| `ble_link.encode_connect_ind_payload`, `.decode_connect_ind_payload` | no |
-| `ble_link.encode_ad_structures`, `.decode_ad_structures`, `.find_ad_structure` | no |
-| `ble_link.encode_data_header`, `.decode_data_header` | no |
-| `ble_link.encode_control_pdu`, `.decode_control_pdu`, `.control_opcode` | no |
-| `ble_link.channel_map`, `.all_channels`, `.channel_used`, `.used_channel_count`, `.used_channel_at` | no |
-| `ble_link.LlError.message` | no |
-| `ble_channel.next_channel_csa1` | no |
-| `ble_channel.channel_identifier`, `.channel_csa2`, `.unmapped_channel_csa2` | no |
+The edge suite is what fills in the rest: every advertising PDU the
+package codes, every control PDU, the refusals only a malformed capture
+produces, and the message of each `LlError` variant. A branch no test
+takes is a branch whose behaviour is not known.
 
 ## Licence
 

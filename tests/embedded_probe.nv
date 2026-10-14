@@ -11,21 +11,14 @@
 // controller, and a link-layer codec that did not compile for one would
 // be a library about radios for machines that have none.
 //
-// It BUILDS; it does not run.  Every function it calls is a `todo()`
-// today, so a device that executed this would panic on the first line
-// of `main`.  What is being checked is the TIER: `--target=nrf52-qemu`
-// stamps `@tier(embedded)` on every function it compiles, so the
-// checker walks the module and refuses a `Str` concatenation, a `Bytes`
-// call or an unbounded `while` wherever the implementation later puts
-// one.
-//
 // WHERE THE BYTES COME FROM.  At `@tier(embedded)` a list literal is an
 // implicit heap allocation, a boxed struct literal is a heap cell, and
 // a payload-carrying enum variant is a heap cell too — so a probe
 // cannot write a packet down.  On a device it does not have to: the
 // bytes arrive from the radio's receive buffer and the values arrive
 // from the connection.  `received` and `connection_map` stand where
-// that arrival is; their bodies are `todo()` like everything else here.
+// that arrival is; their bodies are `todo()`, because a host build has
+// no radio to receive from.
 
 use ble_link
 use ble_channel

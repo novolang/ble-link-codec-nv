@@ -1,12 +1,6 @@
 // tests/ble_link_tests.nv — the API tests, written against the
 // signatures.
 //
-// They COMPILE today and they FAIL at run, with `not implemented:
-// ble_link.<fn>` from the `todo()` that is each body.  That is the
-// expected state of an interface release: the compiler has checked
-// every signature, every type and every effect row, and nothing else
-// has been checked because there is nothing else yet.
-//
 // Every byte string here is Core Vol 6 Part B's, and the section is
 // named where it is not obvious: § 2.3 for the advertising header,
 // § 2.3.1.1 for ADV_IND, § 2.3.3.1 for CONNECT_IND, § 2.4 for the data
@@ -121,7 +115,7 @@ fn test_an_adv_ind_is_its_header_its_address_and_its_data()
     test.assert_eq(wire[0] as Int, 0x40)   // ADV_IND, TxAdd random
     test.assert_eq(wire[1] as Int, 9)   // payload length
     test.assert_eq(wire[2] as Int, 0x01)   // AdvA, LSB first
-    test.assert_eq(wire[7] as Int, 0x01)   // the flags AD's length byte
+    test.assert_eq(wire[9] as Int, 0x01)   // the flags AD's type byte
     match ble_link.adv_pdu_type(pdu)
         LlAdvInd => test.assert(true)
         _        => test.fail("an AdvInd is an ADV_IND")

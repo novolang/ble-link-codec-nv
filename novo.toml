@@ -1,15 +1,10 @@
 [package]
 name        = "ble-link-codec-nv"
-version     = "0.0.2"
-description = "The Bluetooth LE link-layer packet codec with no radio: advertising PDUs and their AD structures, the CONNECT_IND payload, the data-channel header, the control PDUs, and the two channel-selection algorithms as pure functions.  Interface only — every body is a todo()."
+version     = "0.1.0"
+description = "The Bluetooth LE link-layer packet codec with no radio: advertising PDUs and their AD structures, the CONNECT_IND payload, the data-channel header, the control PDUs, and the two channel-selection algorithms as pure functions."
 license     = "Apache-2.0"
 
-# An INTERFACE release: every `pub fn` body is a `todo()`, so the
-# signatures and the effect rows are published and nothing is
-# implemented.  `novo pkg publish` recognises the shape and requires
-# both the draft stability and the 0.0.x version; the first
-# implementation is the 0.1.0 published over it.
-stability   = "draft"
+stability   = "experimental"
 
 # `core`.  The link layer is the one place in a BLE stack where a radio
 # is genuinely present, and this package is the half of it that is not:
@@ -22,7 +17,7 @@ category    = "networking"
 tags        = ["bluetooth", "ble", "link-layer", "advertising", "codec", "sans-io", "channel-selection", "embedded"]
 repository  = "https://github.com/novolang/ble-link-codec-nv"
 maintainers = ["novo-lang"]
-novo        = ">= 0.8.9"
+novo        = ">= 0.20.2"
 
 [docs.pages]
 "README.md" = "Link-layer packets, without the radio that sends them"

@@ -1,0 +1,557 @@
+// tests/ble_link_edge_tests.nv — the paths the API tests do not reach.
+//
+// The suite next door pins the byte layouts of the packets a connection
+// actually uses.  This file walks the rest of the surface: every
+// advertising PDU the package codes, every control PDU, the refusals
+// that only a malformed capture produces, and each error's message.
+//
+// A branch no test takes is a branch whose behaviour is not known, and
+// the job of a link-layer codec is to be right about the bytes it was
+// not shown before.  The reference for every layout here is Core Vol 6
+// Part B, section 2.3 for the advertising PDUs, section 2.4 for the
+// data and control PDUs and section 4.5.8.1 for the channel map.
+
+use std.test
+use std.str
+use ble_link
+
+// C0:DE:AD:BE:EF:01 as a random address, LSB-first as the air carries
+// it.
+fn advertiser() -> LlAddress
+    LlAddress {
+        bytes: [0x01 as u8, 0xEF as u8, 0xBE as u8, 0xAD as u8, 0xDE as u8, 0xC0 as u8],
+        random: true }
+
+// C0:DE:AD:BE:EF:02 as a public address, so a header's address bits can
+// be told apart from the other one's.
+fn public_address() -> LlAddress
+    LlAddress {
+        bytes: [0x02 as u8, 0xEF as u8, 0xBE as u8, 0xAD as u8, 0xDE as u8, 0xC0 as u8],
+        random: false }
+
+// Flags: LE General Discoverable, BR/EDR not supported.
+//
+//   02 01 06   length 2, type 0x01, value 0x06
+fn flags_ad() -> [u8]
+    [0x02 as u8, 0x01 as u8, 0x06 as u8]
+
+// A CONNECT_IND's LLData, in the specification's own units.
+fn connect_payload() -> LlConnectIndPayload
+    LlConnectIndPayload {
+        access_address: 0x8E89BED6,
+        crc_init: 0x555555,
+        window_size: 2,
+        window_offset: 6,
+        interval: 24,
+        latency: 0,
+        timeout: 100,
+        channel_map: ble_link.all_channels(),
+        hop_increment: 5,
+        sleep_clock_accuracy: 0 }
+
+// Eight bytes of feature bits, the width of the feature set.
+fn features() -> [u8]
+    [0x01 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8,
+     0x00 as u8, 0x00 as u8, 0x00 as u8, 0x00 as u8]
+
+// `n` bytes of zeroes, the shape a malformed capture has.
+fn zeroes(n: Int) -> [u8]
+    var out: [u8] = []
+    for i in 0..n
+        out = list.append(out, [0x00 as u8])
+    out
+
+// A PDU of type `code` whose header declares `length` bytes and which
+// carries exactly that many, so only the type's own size rule can
+// refuse it.
+fn declaring(code: Int, length: Int) -> [u8]
+    list.append([code as u8, length as u8], zeroes(length))
+
+// The LLID byte a header built with `kind` decodes back to, which the
+// caller compares with the code § 2.4.1 gives that kind.  -1 is what a
+// refusal would give, and no code is -1.
+fn llid_round_trip(kind: LlDataKind) -> Int
+    let wire = ble_link.encode_data_header(LlDataHeader {
+        kind: kind, next_expected_sequence: false, sequence: false,
+        more_data: false, length: 0 })
+    match ble_link.decode_data_header(wire)
+        Err(_)   => -1
+        Ok(back) =>
+            match back.kind
+                LlDataContinuation => 0x1
+                LlDataStart        => 0x2
+                LlDataControl      => 0x3
+                LlDataReserved     => 0
+
+@test
+fn test_every_advertising_pdu_the_package_codes_round_trips()
+    // Each PDU is encoded and read back, because the payload order of a
+    // type is a fact about that type: an encoder and a decoder that
+    // agree with each other have not thereby agreed with § 2.3.
+    let pdus: [LlAdvPdu] = [
+        AdvInd(advertiser(), flags_ad()),
+        AdvDirectInd(advertiser(), public_address()),
+        AdvNonconnInd(advertiser(), flags_ad()),
+        AdvScanInd(advertiser(), flags_ad()),
+        ScanReq(public_address(), advertiser()),
+        ScanRsp(advertiser(), flags_ad()),
+        ConnectInd(public_address(), advertiser(), connect_payload()),
+        AdvExtInd([0x01 as u8, 0x02 as u8, 0x03 as u8])]
+    for pdu in pdus
+        let wire = ble_link.encode_adv_pdu(pdu)
+        let declared = wire[1] as Int
+        test.assert_eq(list.len(wire), 2 + declared)
+        match ble_link.decode_adv_pdu(wire)
+            Err(e)   => test.fail("what encode wrote, decode reads: ${e.message()}")
+            Ok(back) =>
+                test.assert_eq(ble_link.adv_type_code(ble_link.adv_pdu_type(back)),
+                               ble_link.adv_type_code(ble_link.adv_pdu_type(pdu)))
+
+@test
+fn test_a_directed_advertisement_names_its_peer_with_the_rx_bit()
+    // TxAdd is the kind of the address the PDU sends first, RxAdd the
+    // kind of the one it answers to: a direct advertisement from a
+    // random advertiser to a public peer has 0x40 and not 0x80.
+    let wire = ble_link.encode_adv_pdu(AdvDirectInd(advertiser(), public_address()))
+    test.assert_eq(list.len(wire), 14)   // 2 header + 6 + 6
+    test.assert_eq(wire[0] as Int, 0x41)
+    test.assert_eq(wire[1] as Int, 12)
+    match ble_link.decode_adv_pdu(wire)
+        Err(_)  => test.fail("two addresses and nothing else is an ADV_DIRECT_IND")
+        Ok(pdu) =>
+            match pdu
+                AdvDirectInd(who, target) =>
+                    test.assert(who.random)
+                    test.assert(not target.random)
+                    test.assert_eq(who.bytes[0] as Int, 0x01)
+                    test.assert_eq(target.bytes[0] as Int, 0x02)
+                _                         => test.fail("0x1 is ADV_DIRECT_IND")
+
+@test
+fn test_a_scan_request_answers_to_the_advertiser_s_address_kind()
+    // SCAN_REQ carries the scanner's address and then the
+    // advertiser's, and RxAdd is the second one's kind.
+    let wire = ble_link.encode_adv_pdu(ScanReq(public_address(), advertiser()))
+    test.assert_eq(wire[0] as Int, 0x83)   // 0x3 and RxAdd, TxAdd clear
+    test.assert_eq(wire[1] as Int, 12)
+    match ble_link.decode_adv_pdu(wire)
+        Err(_)  => test.fail("what encode wrote, decode reads")
+        Ok(pdu) =>
+            match pdu
+                ScanReq(scanner, who) =>
+                    test.assert(not scanner.random)
+                    test.assert(who.random)
+                    test.assert_eq(scanner.bytes[0] as Int, 0x02)
+                    test.assert_eq(who.bytes[0] as Int, 0x01)
+                _                     => test.fail("0x3 is SCAN_REQ")
+
+@test
+fn test_an_extended_pdu_keeps_its_payload_as_bytes()
+    // The Common Extended Advertising Payload is a format of its own
+    // with its own optional-field bitmap; this package carries it as
+    // bytes and the header's length is its whole length.
+    let payload: [u8] = [0x01 as u8, 0x02 as u8, 0x03 as u8, 0x04 as u8]
+    let wire = ble_link.encode_adv_pdu(AdvExtInd(payload))
+    test.assert_eq(list.len(wire), 6)
+    test.assert_eq(wire[1] as Int, 4)
+    match ble_link.decode_adv_pdu(wire)
+        Err(_)  => test.fail("what encode wrote, decode reads")
+        Ok(pdu) =>
+            match pdu
+                AdvExtInd(back) =>
+                    test.assert_eq(list.len(back), 4)
+                    test.assert_eq(back[3] as Int, 0x04)
+                _               => test.fail("0x7 is ADV_EXT_IND")
+
+@test
+fn test_a_reserved_advertising_type_is_refused_with_its_code()
+    // 0x8 to 0xF have no format.  The code is read out of the packet
+    // and named in the refusal, which is how a capture tool says what
+    // the radio heard.
+    test.assert_eq(ble_link.adv_type_code(LlAdvReserved(0x0C)), 0x0C)
+    match ble_link.decode_adv_pdu([0x08 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("a reserved type carries no format to read")
+        Err(e) =>
+            match e
+                LlUnsupportedAdvType(code) => test.assert_eq(code, 0x08)
+                _                          => test.fail("the refusal names the type")
+
+@test
+fn test_a_length_the_bytes_do_not_fill_is_refused()
+    // An ADV_IND whose header declares nine bytes and carries four is a
+    // capture that lost bytes, and the two numbers are what says so.
+    match ble_link.decode_adv_pdu([0x00 as u8, 0x09 as u8, 0x01 as u8, 0x02 as u8])
+        Ok(_)  => test.fail("a declared length of nine needs nine bytes")
+        Err(e) =>
+            match e
+                LlLengthMismatch(declared, actual) =>
+                    test.assert_eq(declared, 9)
+                    test.assert_eq(actual, 2)
+                _                                  => test.fail("the refusal names both lengths")
+
+@test
+fn test_a_fixed_size_pdu_of_the_wrong_size_is_refused()
+    // CONNECT_IND's payload is 34 bytes whatever its header says, so a
+    // header that agrees with the bytes present but not with the type
+    // is still a packet this package cannot decode.
+    match ble_link.decode_adv_pdu(declaring(0x05, 12))
+        Ok(_)  => test.fail("12 bytes are not the 34 a CONNECT_IND carries")
+        Err(e) =>
+            match e
+                LlLengthMismatch(declared, fixed) =>
+                    test.assert_eq(declared, 12)
+                    test.assert_eq(fixed, 34)
+                _                                 => test.fail("the refusal names both lengths")
+
+@test
+fn test_a_payload_shorter_than_the_address_it_opens_with_is_refused()
+    // ADV_IND's payload opens with AdvA, so three bytes cannot be an
+    // advertisement however they read.
+    match ble_link.decode_adv_pdu([0x00 as u8, 0x03 as u8, 0x01 as u8, 0x02 as u8, 0x03 as u8])
+        Ok(_)  => test.fail("three bytes are not a six-byte address")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 3)
+                    test.assert_eq(need, ble_link.ADDRESS_LEN)
+                _                         => test.fail("the refusal names the length it needed")
+
+@test
+fn test_an_advertising_payload_past_thirty_seven_bytes_is_refused()
+    match ble_link.decode_adv_pdu(declaring(0x40, 40))
+        Ok(_)  => test.fail("§ 2.3 caps an advertising payload at 37 bytes")
+        Err(e) =>
+            match e
+                LlAdvPayloadOverLimit(length) => test.assert_eq(length, 40)
+                _                             => test.fail("the refusal names the length")
+
+@test
+fn test_a_header_longer_than_its_first_two_bytes_ignores_the_rest()
+    // The decoder is handed what the radio produced; the bytes after
+    // the header are the payload's business and not its own.
+    match ble_link.decode_adv_header([0x00 as u8, 0x09 as u8, 0x01 as u8])
+        Err(_)   => test.fail("three bytes are a header plus one")
+        Ok(back) =>
+            test.assert_eq(back.length, 9)
+            test.assert_eq(ble_link.adv_type_code(back.pdu_type), 0)
+
+@test
+fn test_a_connect_ind_payload_keeps_every_field_in_spec_units()
+    let wire = ble_link.encode_connect_ind_payload(connect_payload())
+    test.assert_eq(list.len(wire), 22)
+    test.assert_eq(wire[0] as Int, 0xD6)   // access address, LSB first
+    test.assert_eq(wire[7] as Int, 2)   // WinSize
+    test.assert_eq(wire[21] as Int, 5)   // Hop 5, SCA 0
+    match ble_link.decode_connect_ind_payload(wire)
+        Err(e)   => test.fail("what encode wrote, decode reads: ${e.message()}")
+        Ok(back) =>
+            test.assert_eq(back.access_address, 0x8E89BED6)
+            test.assert_eq(back.crc_init, 0x555555)
+            test.assert_eq(back.window_size, 2)
+            test.assert_eq(back.window_offset, 6)
+            test.assert_eq(back.interval, 24)
+            test.assert_eq(back.latency, 0)
+            test.assert_eq(back.timeout, 100)
+            test.assert_eq(ble_link.used_channel_count(back.channel_map), 37)
+            test.assert_eq(back.hop_increment, 5)
+            test.assert_eq(back.sleep_clock_accuracy, 0)
+
+@test
+fn test_connect_ind_ll_data_of_the_wrong_size_is_refused()
+    match ble_link.decode_connect_ind_payload([0x00 as u8])
+        Ok(_)  => test.fail("the LLData of a CONNECT_IND is 22 bytes")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 22)
+                _                         => test.fail("the refusal names the length it needed")
+    match ble_link.decode_connect_ind_payload(zeroes(23))
+        Ok(_)  => test.fail("23 bytes are one more than the LLData carries")
+        Err(e) =>
+            match e
+                LlLengthMismatch(declared, actual) =>
+                    test.assert_eq(declared, 22)
+                    test.assert_eq(actual, 23)
+                _                                  => test.fail("the refusal names both lengths")
+
+@test
+fn test_an_advertising_structure_list_survives_its_own_encoding()
+    // The length byte is written from the data, so a structure cannot
+    // carry a length that disagrees with what it holds.
+    let structures: [AdStructure] = [
+        AdStructure { ad_type: ble_link.AD_FLAGS, data: [0x06 as u8] },
+        AdStructure { ad_type: ble_link.AD_COMPLETE_LOCAL_NAME,
+                      data: [0x6E as u8, 0x76 as u8] },
+        AdStructure { ad_type: ble_link.AD_APPEARANCE, data: [0x00 as u8, 0x00 as u8] }]
+    let data = ble_link.encode_ad_structures(structures)
+    test.assert_eq(list.len(data), 11)
+    test.assert_eq(data[0] as Int, 0x02)
+    test.assert_eq(data[3] as Int, 0x03)
+    match ble_link.decode_ad_structures(data)
+        Err(e)   => test.fail("what encode wrote, decode reads: ${e.message()}")
+        Ok(back) =>
+            test.assert_eq(list.len(back), 3)
+            test.assert_eq(back[2].ad_type, ble_link.AD_APPEARANCE)
+            match ble_link.find_ad_structure(back, ble_link.AD_COMPLETE_LOCAL_NAME)
+                None    => test.fail("the local name is in there")
+                Some(s) => test.assert_eq(list.len(s.data), 2)
+            match ble_link.find_ad_structure(back, ble_link.AD_TX_POWER_LEVEL)
+                None    => test.assert(true)
+                Some(_) => test.fail("no TX power structure was written")
+
+@test
+fn test_an_empty_advertising_data_is_no_structures()
+    let data = ble_link.encode_ad_structures([])
+    test.assert_eq(list.len(data), 0)
+    match ble_link.decode_ad_structures(data)
+        Err(_)  => test.fail("no bytes are no structures and not a fault")
+        Ok(ads) => test.assert_eq(list.len(ads), 0)
+
+@test
+fn test_a_structure_that_runs_off_the_end_names_its_offset()
+    // A length byte of 9 with two bytes after it is three bytes short;
+    // the offset is what a capture tool needs to show where the data
+    // went wrong.
+    match ble_link.decode_ad_structures([0x02 as u8, 0x01 as u8, 0x06 as u8,
+                                         0x09 as u8, 0x01 as u8, 0x06 as u8])
+        Ok(_)  => test.fail("nine bytes cannot be read out of three")
+        Err(e) =>
+            match e
+                LlBadAdStructure(offset) => test.assert_eq(offset, 3)
+                _                        => test.fail("the refusal names the offset")
+
+@test
+fn test_a_zero_length_byte_ends_the_structure_list()
+    // A 31-byte buffer padded with zeroes is a well-formed
+    // advertisement, and the zeroes after the last structure are the
+    // padding and not six malformed structures.
+    match ble_link.decode_ad_structures([0x02 as u8, 0x01 as u8, 0x06 as u8,
+                                         0x00 as u8, 0x00 as u8, 0x00 as u8])
+        Err(_)  => test.fail("a zero length byte is the end of the list")
+        Ok(ads) =>
+            test.assert_eq(list.len(ads), 1)
+            test.assert_eq(ads[0].ad_type, ble_link.AD_FLAGS)
+
+@test
+fn test_every_payload_kind_the_llid_field_can_name_is_written()
+    // 0b00 is reserved and still a value: the packet arrived, and what
+    // it said is what a decode is for.
+    let continuation = ble_link.encode_data_header(LlDataHeader {
+        kind: LlDataContinuation, next_expected_sequence: false,
+        sequence: false, more_data: false, length: 0 })
+    let start = ble_link.encode_data_header(LlDataHeader {
+        kind: LlDataStart, next_expected_sequence: false,
+        sequence: false, more_data: false, length: 0 })
+    let control = ble_link.encode_data_header(LlDataHeader {
+        kind: LlDataControl, next_expected_sequence: false,
+        sequence: false, more_data: false, length: 0 })
+    let reserved = ble_link.encode_data_header(LlDataHeader {
+        kind: LlDataReserved, next_expected_sequence: false,
+        sequence: false, more_data: false, length: 0 })
+    test.assert_eq(continuation[0] as Int, 0x01)
+    test.assert_eq(start[0] as Int, 0x02)
+    test.assert_eq(control[0] as Int, 0x03)
+    test.assert_eq(reserved[0] as Int, 0x00)
+    // And each code reads back as the kind that wrote it.
+    test.assert_eq(llid_round_trip(LlDataContinuation), 0x01)
+    test.assert_eq(llid_round_trip(LlDataStart), 0x02)
+    test.assert_eq(llid_round_trip(LlDataControl), 0x03)
+    test.assert_eq(llid_round_trip(LlDataReserved), 0x00)
+
+@test
+fn test_a_header_needs_its_two_bytes()
+    match ble_link.decode_adv_header([])
+        Ok(_)  => test.fail("a header is two bytes and there are none")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 0)
+                    test.assert_eq(need, 2)
+                _                         => test.fail("the refusal names the length it needed")
+    match ble_link.decode_adv_header([0x00 as u8])
+        Ok(_)  => test.fail("one byte is not a header")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 2)
+                _                         => test.fail("the refusal names the length it needed")
+
+@test
+fn test_the_selection_and_address_bits_of_a_header_are_read_back()
+    // 0b0110: ChSel and TxAdd set, RxAdd clear, type 0.
+    match ble_link.decode_adv_header([0x60 as u8, 0x00 as u8])
+        Err(_)   => test.fail("two bytes are a whole header")
+        Ok(back) =>
+            test.assert_eq(ble_link.adv_type_code(back.pdu_type), 0)
+            test.assert(back.channel_selection)
+            test.assert(back.tx_add)
+            test.assert(not back.rx_add)
+            test.assert_eq(back.length, 0)
+
+@test
+fn test_a_control_opcode_the_specification_does_not_define_is_refused()
+    // 0x0F and above are reserved.  The opcode is carried in the
+    // refusal because it is the byte the peer is owed in an
+    // LL_UNKNOWN_RSP.
+    match ble_link.decode_control_pdu([0x7F as u8])
+        Ok(_)  => test.fail("0x7F is not a control opcode this package knows")
+        Err(e) =>
+            match e
+                LlUnknownControlOpcode(opcode) => test.assert_eq(opcode, 0x7F)
+                _                              => test.fail("the refusal names the opcode")
+    match ble_link.decode_control_pdu([0x7F as u8, 0x00 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("an unknown opcode is unknown at any length")
+        Err(_) => test.assert(true)
+
+@test
+fn test_the_data_header_carries_a_kind_and_three_one_bit_flags()
+    let header = LlDataHeader {
+        kind: LlDataControl,
+        next_expected_sequence: true,
+        sequence: true,
+        more_data: true,
+        length: 5 }
+    let wire = ble_link.encode_data_header(header)
+    test.assert_eq(list.len(wire), 2)
+    test.assert_eq(wire[0] as Int, 0x1F)   // LLID 0b11 and all three flags
+    test.assert_eq(wire[1] as Int, 5)
+    match ble_link.decode_data_header(wire)
+        Err(_)   => test.fail("what encode wrote, decode reads")
+        Ok(back) =>
+            test.assert(back.next_expected_sequence)
+            test.assert(back.sequence)
+            test.assert(back.more_data)
+            match back.kind
+                LlDataControl => test.assert(true)
+                _             => test.fail("0b11 is LLID_CONTROL")
+
+@test
+fn test_a_data_header_that_is_one_byte_has_no_length()
+    match ble_link.decode_data_header([0x01 as u8])
+        Ok(_)  => test.fail("a data header is two bytes")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 2)
+                _                         => test.fail("the refusal names the length it needed")
+
+@test
+fn test_every_control_pdu_round_trips()
+    // Each opcode has one template length, and an opcode and its
+    // parameters are the whole of a control PDU.
+    let map = ble_link.all_channels()
+    let version = LlVersion {
+        version_number: 0x0A,
+        company_identifier: 0x003F,
+        subversion_number: 0x0100 }
+    let random: [u8] = [0x11 as u8, 0x12 as u8, 0x13 as u8, 0x14 as u8,
+                        0x15 as u8, 0x16 as u8, 0x17 as u8, 0x18 as u8]
+    let skd: [u8] = [0x01 as u8, 0x02 as u8, 0x03 as u8, 0x04 as u8,
+                     0x05 as u8, 0x06 as u8, 0x07 as u8, 0x08 as u8]
+    let iv: [u8] = [0x0A as u8, 0x0B as u8, 0x0C as u8, 0x0D as u8]
+    let pdus: [LlControlPdu] = [
+        ConnectionUpdateInd(2, 6, 24, 0, 100, 0x0064),
+        ChannelMapInd(map, 0x0064),
+        TerminateInd(0x13),
+        EncReq(random, 0x1234, skd, iv),
+        EncRsp(skd, iv),
+        StartEncReq,
+        StartEncRsp,
+        PauseEncReq,
+        PauseEncRsp,
+        UnknownRsp(0x7F),
+        FeatureReq(features()),
+        FeatureRsp(features()),
+        VersionInd(version),
+        RejectInd(0x1A),
+        PeripheralFeatureReq(features())]
+    for pdu in pdus
+        let wire = ble_link.encode_control_pdu(pdu)
+        let opcode = wire[0] as Int
+        test.assert_eq(opcode, ble_link.control_opcode(pdu))
+        match ble_link.decode_control_pdu(wire)
+            Err(e)   => test.fail("what encode wrote, decode reads: ${e.message()}")
+            Ok(back) => test.assert_eq(ble_link.control_opcode(back), opcode)
+
+@test
+fn test_a_control_pdu_that_is_not_its_template_length_is_refused()
+    match ble_link.decode_control_pdu([])
+        Ok(_)  => test.fail("an opcode is one byte, so empty has none")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 0)
+                    test.assert_eq(need, 1)
+                _                         => test.fail("the refusal names the byte it needed")
+    match ble_link.decode_control_pdu([0x00 as u8])
+        Ok(_)  => test.fail("a connection update is twelve bytes")
+        Err(e) =>
+            match e
+                LlPduTooShort(have, need) =>
+                    test.assert_eq(have, 1)
+                    test.assert_eq(need, 12)
+                _                         => test.fail("the refusal names the length it needed")
+    // A terminate indication is an opcode and one error code, so a
+    // third byte is one the peer did not send.
+    match ble_link.decode_control_pdu([0x02 as u8, 0x13 as u8, 0x00 as u8])
+        Ok(_)  => test.fail("a terminate indication is two bytes")
+        Err(e) =>
+            match e
+                LlLengthMismatch(declared, actual) =>
+                    test.assert_eq(declared, 2)
+                    test.assert_eq(actual, 3)
+                _                                  => test.fail("the refusal names both lengths")
+
+@test
+fn test_the_channel_map_answers_only_for_channels_it_has()
+    // Index 37 is not a data channel and -1 is not an index; both are
+    // false rather than a fault, because a caller walking a capture's
+    // bytes will produce one sooner or later.
+    let map = ble_link.all_channels()
+    test.assert(ble_link.channel_used(map, 0))
+    test.assert(ble_link.channel_used(map, 36))
+    test.assert(not ble_link.channel_used(map, 37))
+    test.assert(not ble_link.channel_used(map, -1))
+    test.assert_eq(ble_link.used_channel_count(map), 37)
+    match ble_link.used_channel_at(map, 36)
+        Err(_) => test.fail("channel 36 is the last of the 37")
+        Ok(ch) => test.assert_eq(ch, 36)
+    match ble_link.used_channel_at(map, 37)
+        Ok(_)  => test.fail("the 38th used channel does not exist")
+        Err(e) =>
+            match e
+                LlChannelOutOfRange(index) => test.assert_eq(index, 37)
+                _                          => test.fail("the refusal names the index")
+
+@test
+fn test_a_channel_map_that_is_not_five_bytes_is_refused()
+    match ble_link.channel_map([0xFF as u8, 0xFF as u8, 0xFF as u8, 0xFF as u8])
+        Ok(_)  => test.fail("a channel map is five bytes")
+        Err(e) =>
+            match e
+                LlChannelOutOfRange(length) => test.assert_eq(length, 4)
+                _                           => test.fail("the refusal names the width")
+    match ble_link.channel_map([0xFF as u8, 0xFF as u8, 0xFF as u8, 0xFF as u8,
+                                0x1F as u8, 0x00 as u8])
+        Ok(_)  => test.fail("a channel map is five bytes")
+        Err(_) => test.assert(true)
+
+@test
+fn test_every_refusal_says_what_went_wrong_in_words()
+    // A `Result<_, LlError>` requires an Error impl and a message is
+    // what it is for; every variant has one and none is empty.
+    let errors: [LlError] = [
+        LlPduTooShort(1, 2),
+        LlLengthMismatch(9, 3),
+        LlAdvPayloadOverLimit(40),
+        LlUnsupportedAdvType(0x0C),
+        LlUnknownControlOpcode(0x7F),
+        LlBadAdStructure(4),
+        LlChannelOutOfRange(37),
+        LlNoChannelUsed,
+        LlBadAddressLength(4)]
+    for e in errors
+        test.assert(str.len(e.message()) > 0)

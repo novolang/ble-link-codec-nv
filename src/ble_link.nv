@@ -1,9 +1,5 @@
 // ble_link — the Bluetooth LE link-layer packet codec, with no radio.
 //
-// Every body is a `todo()`.  The signatures and the effect rows are the
-// design, and the compiler checks them as claims; see the README for
-// the stamp.
-//
 // Core Vol 6 Part B.  The link layer is where a BLE stack meets the
 // air, and it is two things stacked: a set of packet formats, and a
 // state machine wired to a radio's timers.  This package is the first
@@ -22,7 +18,7 @@
 // overwritten by an encryption context, because it is not anywhere in
 // particular.
 
-// ── Addresses (§ 1.3) ───────────────────────────────────────────────
+// ── Addresses (§ 1.3) ────────────────────────────────────────────────
 
 // A device address and which kind it is.
 //
@@ -38,7 +34,7 @@ pub struct LlAddress
 // How many bytes a device address is.
 pub const ADDRESS_LEN = 6
 
-// ── Advertising PDUs (§ 2.3) ────────────────────────────────────────
+// ── Advertising PDUs (§ 2.3) ─────────────────────────────────────────
 
 // The four-bit PDU type of an advertising-channel packet (§ 2.3,
 // Table 2.3).
@@ -133,9 +129,194 @@ pub struct LlConnectIndPayload
     hop_increment: Int
     sleep_clock_accuracy: Int
 
+// The 22 LLData bytes a CONNECT_IND carries after its two addresses
+// (§ 2.3.3.1).
+const CONNECT_IND_LL_DATA_LEN = 22
+
+// How long `pdu`'s payload is: what its header's second byte holds,
+// with the addresses counted.
+fn adv_payload_length(pdu: LlAdvPdu) -> Int
+    match pdu
+        AdvInd(_, data)        => ADDRESS_LEN + list.len(data)
+        AdvNonconnInd(_, data) => ADDRESS_LEN + list.len(data)
+        AdvScanInd(_, data)    => ADDRESS_LEN + list.len(data)
+        ScanRsp(_, data)       => ADDRESS_LEN + list.len(data)
+        AdvDirectInd(_, _)     => ADDRESS_LEN + ADDRESS_LEN
+        ScanReq(_, _)          => ADDRESS_LEN + ADDRESS_LEN
+        ConnectInd(_, _, _)    => ADDRESS_LEN + ADDRESS_LEN + CONNECT_IND_LL_DATA_LEN
+        AdvExtInd(payload)     => list.len(payload)
+
+// Whether `pdu`'s TxAdd bit is set, which is the kind of the address
+// the PDU sends first.
+fn adv_tx_add(pdu: LlAdvPdu) -> Bool
+    match pdu
+        AdvInd(advertiser, _)        => advertiser.random
+        AdvDirectInd(advertiser, _)  => advertiser.random
+        AdvNonconnInd(advertiser, _) => advertiser.random
+        AdvScanInd(advertiser, _)    => advertiser.random
+        ScanReq(scanner, _)          => scanner.random
+        ScanRsp(advertiser, _)       => advertiser.random
+        ConnectInd(initiator, _, _)  => initiator.random
+        AdvExtInd(_)                 => false
+
+// Whether `pdu`'s RxAdd bit is set: the kind of the address the PDU
+// expects an answer from.  Only the three PDUs carrying two addresses
+// have one.
+fn adv_rx_add(pdu: LlAdvPdu) -> Bool
+    match pdu
+        AdvDirectInd(_, target)      => target.random
+        ScanReq(_, advertiser)       => advertiser.random
+        ConnectInd(_, advertiser, _) => advertiser.random
+        _                            => false
+
+// The first header byte from the fields that go into it: the type code
+// in the low four bits and the channel-selection and address-type bits
+// above it (§ 2.3).
+fn pack_adv_header(code: Int, channel_selection: Bool, tx_add: Bool, rx_add: Bool) -> Int
+    var first = code & 0x0F
+    if channel_selection
+        first = first | 0x20
+    if tx_add
+        first = first | 0x40
+    if rx_add
+        first = first | 0x80
+    first
+
+// Append one byte to a buffer the caller sized.
+//
+// `list.try_push` writes into the buffer it is handed and never grows
+// it, which is the only way the device tier builds a byte list; a
+// caller sizes the buffer from the same count it fills it with.
+fn put_byte(var out: [u8], value: Int)
+    system
+        let _ = list.try_push(out, value as u8)
+
+// Append a `count`-byte little-endian integer, the link layer's
+// convention for every multi-byte field.
+fn put_le(var out: [u8], value: Int, count: Int)
+    system
+        for i in 0..count
+            let _ = list.try_push(out, ((value >> (8 * i)) & 0xFF) as u8)
+
+// Append a byte list as it stands.
+fn put_bytes(var out: [u8], src: [u8])
+    system
+        for b in src
+            let _ = list.try_push(out, b)
+
+// Append a device address, least significant byte first as the air
+// carries it.  Six bytes are read and no more, because the header's
+// length field counts on it.
+fn put_address(var out: [u8], address: LlAddress)
+    system
+        for i in 0..ADDRESS_LEN
+            let _ = list.try_push(out, address.bytes[i])
+
+// Append `pdu`'s addresses in the order its format lays them down.
+fn put_addresses(var out: [u8], pdu: LlAdvPdu)
+    system
+        match pdu
+            AdvInd(advertiser, _)                =>
+                put_address(out, advertiser)
+            AdvDirectInd(advertiser, target)     =>
+                put_address(out, advertiser)
+                put_address(out, target)
+            AdvNonconnInd(advertiser, _)         =>
+                put_address(out, advertiser)
+            AdvScanInd(advertiser, _)            =>
+                put_address(out, advertiser)
+            ScanReq(scanner, advertiser)         =>
+                put_address(out, scanner)
+                put_address(out, advertiser)
+            ScanRsp(advertiser, _)               =>
+                put_address(out, advertiser)
+            ConnectInd(initiator, advertiser, _) =>
+                put_address(out, initiator)
+                put_address(out, advertiser)
+            AdvExtInd(_)                         =>
+                let _ = 0
+
+// Append what follows `pdu`'s addresses: the AD data, the LLData of a
+// CONNECT_IND, or an extended payload as it stands.
+fn put_payload(var out: [u8], pdu: LlAdvPdu)
+    system
+        match pdu
+            AdvInd(_, data)           =>
+                put_bytes(out, data)
+            AdvNonconnInd(_, data)    =>
+                put_bytes(out, data)
+            AdvScanInd(_, data)       =>
+                put_bytes(out, data)
+            ScanRsp(_, data)          =>
+                put_bytes(out, data)
+            ConnectInd(_, _, payload) =>
+                put_bytes(out, encode_connect_ind_payload(payload))
+            AdvExtInd(payload)        =>
+                put_bytes(out, payload)
+            _                         =>
+                let _ = 0
+
 // The advertising PDU as its wire bytes, header included.
 pub fn encode_adv_pdu(pdu: LlAdvPdu) -> [u8]
-    todo("ble_link.encode_adv_pdu")
+    system
+        var out: [u8] = list.with_capacity(2 + adv_payload_length(pdu))
+        // `LlAdvPdu` carries no ChSel bit, so an encoded PDU has it
+        // clear.
+        put_byte(out, pack_adv_header(adv_type_code(adv_pdu_type(pdu)), false,
+                                      adv_tx_add(pdu), adv_rx_add(pdu)))
+        put_byte(out, adv_payload_length(pdu))
+        put_addresses(out, pdu)
+        put_payload(out, pdu)
+        return out
+
+// The `count`-byte little-endian integer at `at`.
+fn read_le(bytes: [u8], at: Int, count: Int) -> Int
+    var value = 0
+    for i in 0..count
+        value = value | (bytes[at + i] as Int << (8 * i))
+    value
+
+// The `count` bytes at `at`, as a list of their own.
+fn payload_at(bytes: [u8], at: Int, count: Int) -> [u8]
+    system
+        var out: [u8] = list.with_capacity(count)
+        for i in 0..count
+            let _ = list.try_push(out, bytes[at + i])
+        return out
+
+// The six-byte address at `at`, with the address-type bit its header
+// carried for it.
+fn address_at(bytes: [u8], at: Int, is_random: Bool) -> LlAddress
+    system
+        return LlAddress { bytes: payload_at(bytes, at, ADDRESS_LEN), random: is_random }
+
+// The payload length a fixed-size advertising PDU must declare, or -1
+// for the types whose length follows their data.
+fn adv_fixed_payload(pdu_type: LlAdvType) -> Int
+    match pdu_type
+        LlAdvDirectInd => ADDRESS_LEN + ADDRESS_LEN
+        LlScanReq      => ADDRESS_LEN + ADDRESS_LEN
+        LlConnectInd   => ADDRESS_LEN + ADDRESS_LEN + CONNECT_IND_LL_DATA_LEN
+        _              => -1
+
+// Whether this PDU type opens its payload with an address.  Extended
+// advertising does not: its payload is the Common Extended Advertising
+// Payload, and the addresses it carries are fields of that format.
+fn adv_has_address(pdu_type: LlAdvType) -> Bool
+    match pdu_type
+        LlAdvExtInd      => false
+        LlAdvReserved(_) => false
+        _                => true
+
+// A whole CONNECT_IND at `bytes`, whose length the caller has already
+// fixed at two addresses and 22 LLData bytes.
+fn connect_at(bytes: [u8], tx_add: Bool, rx_add: Bool) -> Result<LlAdvPdu, LlError>
+    system
+        let ll_data = payload_at(bytes, 2 + ADDRESS_LEN + ADDRESS_LEN,
+                                 CONNECT_IND_LL_DATA_LEN)
+        let payload = decode_connect_ind_payload(ll_data)!
+        return Ok(ConnectInd(address_at(bytes, 2, tx_add),
+                             address_at(bytes, 8, rx_add), payload))
 
 // Read an advertising PDU from the bytes a radio received.
 //
@@ -144,7 +325,37 @@ pub fn encode_adv_pdu(pdu: LlAdvPdu) -> [u8]
 // on every controller worth the name the hardware has already stripped
 // them.
 pub fn decode_adv_pdu(bytes: [u8]) -> Result<LlAdvPdu, LlError>
-    todo("ble_link.decode_adv_pdu")
+    system
+        let header = decode_adv_header(bytes)!
+        let have = list.len(bytes)
+        if header.length > ADV_PAYLOAD_MAX
+            return Err(LlAdvPayloadOverLimit(header.length))
+        if have - 2 != header.length
+            return Err(LlLengthMismatch(header.length, have - 2))
+        let fixed = adv_fixed_payload(header.pdu_type)
+        if fixed >= 0 and header.length != fixed
+            return Err(LlLengthMismatch(header.length, fixed))
+        if adv_has_address(header.pdu_type) and header.length < ADDRESS_LEN
+            return Err(LlPduTooShort(header.length, ADDRESS_LEN))
+        let data_at = 2 + ADDRESS_LEN
+        let data_len = header.length - ADDRESS_LEN
+        let out: Result<LlAdvPdu, LlError> = match header.pdu_type
+            LlAdvInd         => Ok(AdvInd(address_at(bytes, 2, header.tx_add),
+                                          payload_at(bytes, data_at, data_len)))
+            LlAdvDirectInd   => Ok(AdvDirectInd(address_at(bytes, 2, header.tx_add),
+                                                address_at(bytes, 8, header.rx_add)))
+            LlAdvNonconnInd  => Ok(AdvNonconnInd(address_at(bytes, 2, header.tx_add),
+                                                 payload_at(bytes, data_at, data_len)))
+            LlAdvScanInd     => Ok(AdvScanInd(address_at(bytes, 2, header.tx_add),
+                                              payload_at(bytes, data_at, data_len)))
+            LlScanReq        => Ok(ScanReq(address_at(bytes, 2, header.tx_add),
+                                           address_at(bytes, 8, header.rx_add)))
+            LlScanRsp        => Ok(ScanRsp(address_at(bytes, 2, header.tx_add),
+                                           payload_at(bytes, data_at, data_len)))
+            LlConnectInd     => connect_at(bytes, header.tx_add, header.rx_add)
+            LlAdvExtInd      => Ok(AdvExtInd(payload_at(bytes, 2, header.length)))
+            LlAdvReserved(c) => Err(LlUnsupportedAdvType(c))
+        return out
 
 // The header of an advertising PDU, without decoding its payload.
 //
@@ -152,34 +363,115 @@ pub fn decode_adv_pdu(bytes: [u8]) -> Result<LlAdvPdu, LlError>
 // whether the rest is worth reading, and on a device that decision
 // happens before the payload has finished arriving.
 pub fn decode_adv_header(bytes: [u8]) -> Result<LlAdvPduHeader, LlError>
-    todo("ble_link.decode_adv_header")
+    system
+        if list.len(bytes) < 2
+            return Err(LlPduTooShort(list.len(bytes), 2))
+        let first = bytes[0] as Int
+        let header: Result<LlAdvPduHeader, LlError> = Ok(LlAdvPduHeader {
+            pdu_type: adv_type_of(first & 0x0F),
+            channel_selection: (first & 0x20) != 0,
+            tx_add: (first & 0x40) != 0,
+            rx_add: (first & 0x80) != 0,
+            length: bytes[1] as Int })
+        return header
 
 // The two header bytes for a PDU type, its flags and its length.
 pub fn encode_adv_header(header: LlAdvPduHeader) -> [u8]
-    todo("ble_link.encode_adv_header")
+    system
+        var out: [u8] = list.with_capacity(2)
+        put_byte(out, pack_adv_header(adv_type_code(header.pdu_type),
+                                      header.channel_selection,
+                                      header.tx_add, header.rx_add))
+        put_byte(out, header.length)
+        return out
 
 // The four-bit code an advertising PDU type is.
 pub fn adv_type_code(pdu_type: LlAdvType) -> Int
-    todo("ble_link.adv_type_code")
+    match pdu_type
+        LlAdvInd         => 0
+        LlAdvDirectInd   => 0x1
+        LlAdvNonconnInd  => 0x2
+        LlScanReq        => 0x3
+        LlScanRsp        => 0x4
+        LlConnectInd     => 0x5
+        LlAdvScanInd     => 0x6
+        LlAdvExtInd      => 0x7
+        LlAdvReserved(c) => c
 
 // The type a four-bit code names.  Total: a reserved code keeps its
 // number rather than being dropped.
 pub fn adv_type_of(code: Int) -> LlAdvType
-    todo("ble_link.adv_type_of")
+    system
+        let out: LlAdvType = match code
+            0   => LlAdvInd
+            0x1 => LlAdvDirectInd
+            0x2 => LlAdvNonconnInd
+            0x3 => LlScanReq
+            0x4 => LlScanRsp
+            0x5 => LlConnectInd
+            0x6 => LlAdvScanInd
+            0x7 => LlAdvExtInd
+            _   => LlAdvReserved(code)
+        return out
 
 // The type of PDU a value is, without matching every variant.
 pub fn adv_pdu_type(pdu: LlAdvPdu) -> LlAdvType
-    todo("ble_link.adv_pdu_type")
+    match pdu
+        AdvInd(_, _)        => LlAdvInd
+        AdvDirectInd(_, _)  => LlAdvDirectInd
+        AdvNonconnInd(_, _) => LlAdvNonconnInd
+        AdvScanInd(_, _)    => LlAdvScanInd
+        ScanReq(_, _)       => LlScanReq
+        ScanRsp(_, _)       => LlScanRsp
+        ConnectInd(_, _, _) => LlConnectInd
+        AdvExtInd(_)        => LlAdvExtInd
 
 // The CONNECT_IND's LLData as its 22 wire bytes (§ 2.3.3.1).
 pub fn encode_connect_ind_payload(payload: LlConnectIndPayload) -> [u8]
-    todo("ble_link.encode_connect_ind_payload")
+    system
+        var out: [u8] = list.with_capacity(CONNECT_IND_LL_DATA_LEN)
+        put_le(out, payload.access_address, 4)
+        put_le(out, payload.crc_init, 3)
+        put_byte(out, payload.window_size)
+        put_le(out, payload.window_offset, 2)
+        put_le(out, payload.interval, 2)
+        put_le(out, payload.latency, 2)
+        put_le(out, payload.timeout, 2)
+        put_bytes(out, payload.channel_map.mask)
+        put_byte(out, payload.hop_increment | (payload.sleep_clock_accuracy << 5))
+        return out
+
+// The five mask bytes at `at` as a channel map, without the width check
+// `channel_map` performs: the formats that call this have already fixed
+// the field at five bytes.
+fn map_at(bytes: [u8], at: Int) -> LlChannelMap
+    system
+        return LlChannelMap { mask: payload_at(bytes, at, CHANNEL_MAP_LEN) }
 
 // Read a CONNECT_IND's LLData from the 22 bytes after the addresses.
 pub fn decode_connect_ind_payload(bytes: [u8]) -> Result<LlConnectIndPayload, LlError>
-    todo("ble_link.decode_connect_ind_payload")
+    system
+        let have = list.len(bytes)
+        if have < CONNECT_IND_LL_DATA_LEN
+            return Err(LlPduTooShort(have, CONNECT_IND_LL_DATA_LEN))
+        if have > CONNECT_IND_LL_DATA_LEN
+            return Err(LlLengthMismatch(CONNECT_IND_LL_DATA_LEN, have))
+        // The last LLData byte is Hop(5) | SCA(3), low bits first.
+        let last = bytes[21] as Int
+        let out: Result<LlConnectIndPayload, LlError> = Ok(LlConnectIndPayload {
+            access_address: read_le(bytes, 0, 4),
+            crc_init: read_le(bytes, 4, 3),
+            window_size: bytes[7] as Int,
+            window_offset: read_le(bytes, 8, 2),
+            interval: read_le(bytes, 10, 2),
+            latency: read_le(bytes, 12, 2),
+            timeout: read_le(bytes, 14, 2),
+            channel_map: map_at(bytes, 16),
+            hop_increment: last & 0x1F,
+            sleep_clock_accuracy: last >> 5 })
+        return out
 
-// ── AD structures (Core Spec Supplement Part A § 1) ─────────────────
+// ── AD structures (Core Spec Supplement Part A § 1) ──────────────────
 
 // One AD structure: a type byte and its data.
 //
@@ -231,10 +523,24 @@ pub const AD_FLAG_LE_GENERAL_DISCOVERABLE = 0x02
 // The BR/EDR Not Supported flag, which every LE-only device sets.
 pub const AD_FLAG_BR_EDR_NOT_SUPPORTED = 0x04
 
+// How many bytes these structures take as AD data: each one's length
+// byte, its type byte, and its data.
+fn ad_structures_length(structures: [AdStructure]) -> Int
+    var total = 0
+    for structure in structures
+        total = total + 2 + list.len(structure.data)
+    total
+
 // The AD structures as the advertising data bytes: length, type, data,
 // repeated.
 pub fn encode_ad_structures(structures: [AdStructure]) -> [u8]
-    todo("ble_link.encode_ad_structures")
+    system
+        var out: [u8] = list.with_capacity(ad_structures_length(structures))
+        for structure in structures
+            put_byte(out, 1 + list.len(structure.data))
+            put_byte(out, structure.ad_type)
+            put_bytes(out, structure.data)
+        return out
 
 // Read the AD structures out of advertising data.
 //
@@ -258,13 +564,33 @@ pub fn encode_ad_structures(structures: [AdStructure]) -> [u8]
 //                 Some(f) => println("flags: ${f.data[0] as Int}")
 // ```
 pub fn decode_ad_structures(data: [u8]) -> Result<[AdStructure], LlError>
-    todo("ble_link.decode_ad_structures")
+    system
+        let have = list.len(data)
+        var out: [AdStructure] = list.with_capacity(have)
+        var at = 0
+        loop
+            if at >= have
+                break
+            let length = data[at] as Int
+            if length == 0
+                break
+            if at + 1 + length > have
+                return Err(LlBadAdStructure(at))
+            let _ = list.try_push(out, AdStructure {
+                ad_type: data[at + 1] as Int,
+                data: payload_at(data, at + 2, length - 1) })
+            at = at + 1 + length
+        return Ok(out)
 
 // The first structure of a type, or `None` when the data carries none.
 pub fn find_ad_structure(structures: [AdStructure], ad_type: Int) -> ?AdStructure
-    todo("ble_link.find_ad_structure")
+    for structure in structures
+        if structure.ad_type == ad_type
+            system
+                return Some(structure)
+    None
 
-// ── Data-channel PDUs (§ 2.4) ───────────────────────────────────────
+// ── Data-channel PDUs (§ 2.4) ────────────────────────────────────────
 
 // What a data-channel PDU's payload is (§ 2.4, the LLID field).
 pub enum LlDataKind
@@ -300,15 +626,53 @@ pub const DATA_PAYLOAD_DEFAULT_MAX = 27
 // The largest data-channel payload Data Length Extension allows.
 pub const DATA_PAYLOAD_MAX = 251
 
+// The two-bit LLID field a data-channel payload kind is (§ 2.4).
+fn data_kind_code(kind: LlDataKind) -> Int
+    match kind
+        LlDataContinuation => 0x1
+        LlDataStart        => 0x2
+        LlDataControl      => 0x3
+        LlDataReserved     => 0
+
+// The payload kind a two-bit LLID field is.  Reserved is a value and
+// not a refusal: the packet arrived, and saying what it was is the
+// whole job here.
+fn data_kind_of(code: Int) -> LlDataKind
+    match code
+        0x1 => LlDataContinuation
+        0x2 => LlDataStart
+        0x3 => LlDataControl
+        _   => LlDataReserved
+
 // The two header bytes for a data-channel PDU.
 pub fn encode_data_header(header: LlDataHeader) -> [u8]
-    todo("ble_link.encode_data_header")
+    system
+        var first = data_kind_code(header.kind)
+        if header.next_expected_sequence
+            first = first | 0x04
+        if header.sequence
+            first = first | 0x08
+        if header.more_data
+            first = first | 0x10
+        var out: [u8] = list.with_capacity(2)
+        put_byte(out, first)
+        put_byte(out, header.length)
+        return out
 
 // Read a data-channel PDU header.
 pub fn decode_data_header(bytes: [u8]) -> Result<LlDataHeader, LlError>
-    todo("ble_link.decode_data_header")
+    system
+        if list.len(bytes) < 2
+            return Err(LlPduTooShort(list.len(bytes), 2))
+        let first = bytes[0] as Int
+        return Ok(LlDataHeader {
+            kind: data_kind_of(first & 0x03),
+            next_expected_sequence: (first & 0x04) != 0,
+            sequence: (first & 0x08) != 0,
+            more_data: (first & 0x10) != 0,
+            length: bytes[1] as Int })
 
-// ── Control PDUs (§ 2.4.2) ──────────────────────────────────────────
+// ── Control PDUs (§ 2.4.2) ───────────────────────────────────────────
 
 // A link-layer version: the specification number, the company that
 // implemented it, and that company's own subversion (§ 2.4.2.13).
@@ -366,25 +730,169 @@ pub enum LlControlPdu
 // How many bytes a feature set is (§ 4.6).
 pub const FEATURE_SET_LEN = 8
 
+// How many bytes a control PDU's parameters take, its opcode aside.
+//
+// A parameter length that is one byte short makes the buffer one byte
+// short, and `list.try_push` drops what will not fit, so these are the
+// wire lengths themselves and not an estimate.
+fn control_parameter_length(pdu: LlControlPdu) -> Int
+    match pdu
+        ConnectionUpdateInd(_, _, _, _, _, _) => 11
+        ChannelMapInd(_, _)                   => 7
+        TerminateInd(_)                       => 1
+        EncReq(rand, _, skd, iv)              => list.len(rand) + 2 + list.len(skd) + list.len(iv)
+        EncRsp(skd, iv)                       => list.len(skd) + list.len(iv)
+        UnknownRsp(_)                         => 1
+        FeatureReq(features)                  => list.len(features)
+        FeatureRsp(features)                  => list.len(features)
+        VersionInd(_)                         => 5
+        RejectInd(_)                          => 1
+        PeripheralFeatureReq(features)        => list.len(features)
+        _                                     => 0
+
+// How many bytes a control PDU takes in all, its opcode included, or
+// -1 for an opcode § 2.4.2 does not define.  Every one of them is
+// fixed: the encryption pair's key halves are eight bytes each and
+// their IVs four.
+//
+// The four opcodes whose hex spelling is also an ASCII escape — 0, 9,
+// 10 and 13 — are written in decimal, here and in the two tables
+// below.  `novo.lint` reads the hex spelling of those four as a
+// character literal, and a change of spelling changes no value.
+fn control_pdu_length(opcode: Int) -> Int
+    match opcode
+        0   => 12
+        0x1 => 8
+        0x2 => 2
+        0x3 => 23
+        0x4 => 13
+        0x5 => 1
+        0x6 => 1
+        0x7 => 2
+        0x8 => 9
+        9   => 9
+        10  => 1
+        0xb => 1
+        0xc => 6
+        13  => 2
+        0xe => 9
+        _   => -1
+
+// The version exchange's three fields at `at`.
+fn version_at(bytes: [u8], at: Int) -> LlVersion
+    system
+        return LlVersion { version_number: bytes[at] as Int,
+                           company_identifier: read_le(bytes, at + 1, 2),
+                           subversion_number: read_le(bytes, at + 3, 2) }
+
 // The control PDU as its wire bytes: the opcode, then its parameters.
 //
 // The result is the PAYLOAD of a data-channel PDU whose header says
 // `LlDataControl`; `encode_data_header` writes that header.
 pub fn encode_control_pdu(pdu: LlControlPdu) -> [u8]
-    todo("ble_link.encode_control_pdu")
+    system
+        var out: [u8] = list.with_capacity(1 + control_parameter_length(pdu))
+        put_byte(out, control_opcode(pdu))
+        match pdu
+            ConnectionUpdateInd(window_size, window_offset, interval, latency, timeout, instant) =>
+                put_byte(out, window_size)
+                put_le(out, window_offset, 2)
+                put_le(out, interval, 2)
+                put_le(out, latency, 2)
+                put_le(out, timeout, 2)
+                put_le(out, instant, 2)
+            ChannelMapInd(map, instant)                                                          =>
+                put_bytes(out, map.mask)
+                put_le(out, instant, 2)
+            TerminateInd(error_code)                                                             =>
+                put_byte(out, error_code)
+            EncReq(rand, ediv, skd, iv)                                                          =>
+                put_bytes(out, rand)
+                put_le(out, ediv, 2)
+                put_bytes(out, skd)
+                put_bytes(out, iv)
+            EncRsp(skd, iv)                                                                      =>
+                put_bytes(out, skd)
+                put_bytes(out, iv)
+            UnknownRsp(unknown_type)                                                             =>
+                put_byte(out, unknown_type)
+            FeatureReq(features)                                                                 =>
+                put_bytes(out, features)
+            FeatureRsp(features)                                                                 =>
+                put_bytes(out, features)
+            VersionInd(version)                                                                  =>
+                put_byte(out, version.version_number)
+                put_le(out, version.company_identifier, 2)
+                put_le(out, version.subversion_number, 2)
+            RejectInd(error_code)                                                                =>
+                put_byte(out, error_code)
+            PeripheralFeatureReq(features)                                                       =>
+                put_bytes(out, features)
+            _                                                                                    =>
+                let _ = 0
+        return out
 
 // Read a control PDU from a data-channel payload.
 //
 // An opcode this package does not know is `LlUnknownControlOpcode`,
 // which carries the byte the peer is owed in an LL_UNKNOWN_RSP.
 pub fn decode_control_pdu(bytes: [u8]) -> Result<LlControlPdu, LlError>
-    todo("ble_link.decode_control_pdu")
+    system
+        let have = list.len(bytes)
+        if have < 1
+            return Err(LlPduTooShort(have, 1))
+        let opcode = bytes[0] as Int
+        let need = control_pdu_length(opcode)
+        // An opcode § 2.4.2 defines has exactly one length, and bytes
+        // that are not that length are refused before anything is
+        // read.  A code with no length goes to the match below, which
+        // is where an unknown opcode is named.
+        if need >= 0 and have != need
+            if have < need
+                return Err(LlPduTooShort(have, need))
+            return Err(LlLengthMismatch(need, have))
+        let out: Result<LlControlPdu, LlError> = match opcode
+            0   => Ok(ConnectionUpdateInd(bytes[1] as Int, read_le(bytes, 2, 2),
+                                           read_le(bytes, 4, 2), read_le(bytes, 6, 2),
+                                           read_le(bytes, 8, 2), read_le(bytes, 10, 2)))
+            0x1 => Ok(ChannelMapInd(map_at(bytes, 1), read_le(bytes, 6, 2)))
+            0x2 => Ok(TerminateInd(bytes[1] as Int))
+            0x3 => Ok(EncReq(payload_at(bytes, 1, 8), read_le(bytes, 9, 2),
+                              payload_at(bytes, 11, 8), payload_at(bytes, 19, 4)))
+            0x4 => Ok(EncRsp(payload_at(bytes, 1, 8), payload_at(bytes, 9, 4)))
+            0x5 => Ok(StartEncReq)
+            0x6 => Ok(StartEncRsp)
+            0x7 => Ok(UnknownRsp(bytes[1] as Int))
+            0x8 => Ok(FeatureReq(payload_at(bytes, 1, FEATURE_SET_LEN)))
+            9   => Ok(FeatureRsp(payload_at(bytes, 1, FEATURE_SET_LEN)))
+            10  => Ok(PauseEncReq)
+            0xb => Ok(PauseEncRsp)
+            0xc => Ok(VersionInd(version_at(bytes, 1)))
+            13  => Ok(RejectInd(bytes[1] as Int))
+            0xe => Ok(PeripheralFeatureReq(payload_at(bytes, 1, FEATURE_SET_LEN)))
+            _   => Err(LlUnknownControlOpcode(opcode))
+        return out
 
 // The opcode byte a control PDU carries.
 pub fn control_opcode(pdu: LlControlPdu) -> Int
-    todo("ble_link.control_opcode")
+    match pdu
+        ConnectionUpdateInd(_, _, _, _, _, _) => 0
+        ChannelMapInd(_, _)                   => 0x01
+        TerminateInd(_)                       => 0x02
+        EncReq(_, _, _, _)                    => 0x03
+        EncRsp(_, _)                          => 0x04
+        StartEncReq                           => 0x05
+        StartEncRsp                           => 0x06
+        UnknownRsp(_)                         => 0x07
+        FeatureReq(_)                         => 0x08
+        FeatureRsp(_)                         => 9
+        PauseEncReq                           => 10
+        PauseEncRsp                           => 0x0B
+        VersionInd(_)                         => 0x0C
+        RejectInd(_)                          => 13
+        PeripheralFeatureReq(_)               => 0x0E
 
-// ── The data-channel map (§ 4.5.8.1) ────────────────────────────────
+// ── The data-channel map (§ 4.5.8.1) ─────────────────────────────────
 
 // Which of the 37 data channels this connection uses.
 //
@@ -402,17 +910,30 @@ pub const DATA_CHANNEL_COUNT = 37
 // How many bytes a channel map is.
 pub const CHANNEL_MAP_LEN = 5
 
+// The refusal an index or a length outside the channel map's range
+// gets, built where the tier checker admits a payload.
+fn out_of_range(index: Int) -> LlError
+    system
+        return LlChannelOutOfRange(index)
+
 // A channel map from its five mask bytes.
 pub fn channel_map(mask: [u8]) -> Result<LlChannelMap, LlError>
-    todo("ble_link.channel_map")
+    system
+        if list.len(mask) != CHANNEL_MAP_LEN
+            return Err(out_of_range(list.len(mask)))
+        return Ok(map_at(mask, 0))
 
 // A channel map with every data channel used.
 pub fn all_channels() -> LlChannelMap
-    todo("ble_link.all_channels")
+    system
+        return map_at([0xFF as u8, 0xFF as u8, 0xFF as u8, 0xFF as u8, 0x1F as u8], 0)
 
 // Whether a channel index is in the map.
 pub fn channel_used(map: LlChannelMap, index: Int) -> Bool
-    todo("ble_link.channel_used")
+    if index < 0 or index >= DATA_CHANNEL_COUNT
+        false
+    else
+        ((map.mask[index / 8] >> (index % 8)) & 1) != 0
 
 // How many channels the map uses.
 //
@@ -420,16 +941,27 @@ pub fn channel_used(map: LlChannelMap, index: Int) -> Bool
 // than here, because counting a bad map is a perfectly good thing to
 // do — it is what tells a caller the map is bad.
 pub fn used_channel_count(map: LlChannelMap) -> Int
-    todo("ble_link.used_channel_count")
+    var count = 0
+    for index in 0..DATA_CHANNEL_COUNT
+        if channel_used(map, index)
+            count = count + 1
+    count
 
 // The `n`-th used channel, counting from zero.
 //
 // The remapping table of § 4.5.8.2, computed rather than stored: both
 // selection algorithms land on an unmapped channel and then need this.
 pub fn used_channel_at(map: LlChannelMap, n: Int) -> Result<Int, LlError>
-    todo("ble_link.used_channel_at")
+    system
+        var seen = 0
+        for index in 0..DATA_CHANNEL_COUNT
+            if channel_used(map, index)
+                if seen == n
+                    return Ok(index)
+                seen = seen + 1
+        return Err(out_of_range(n))
 
-// ── Errors ──────────────────────────────────────────────────────────
+// ── Errors ───────────────────────────────────────────────────────────
 
 // Why a packet could not be read.
 pub enum LlError
@@ -464,4 +996,15 @@ pub enum LlError
 // type only if it implements `Error`.
 impl Error for LlError
     fn message(self) -> Str
-        todo("ble_link.LlError.message")
+        system
+            let out = match self
+                LlPduTooShort(have, need)     => "ble_link: ${have} bytes where the format needs ${need}"
+                LlLengthMismatch(got, there)  => "ble_link: the header declares ${got} bytes and ${there} are there"
+                LlAdvPayloadOverLimit(length) => "ble_link: an advertising payload of ${length} bytes, over the ${ADV_PAYLOAD_MAX} a legacy PDU carries"
+                LlUnsupportedAdvType(code)    => "ble_link: advertising PDU type ${code} carries no format this package reads"
+                LlUnknownControlOpcode(op)    => "ble_link: control opcode ${op} is not one this package knows"
+                LlBadAdStructure(offset)      => "ble_link: an AD structure at offset ${offset} runs past the data"
+                LlChannelOutOfRange(index)    => "ble_link: ${index} is outside the channel map"
+                LlNoChannelUsed               => "ble_link: the channel map uses no channel"
+                LlBadAddressLength(length)    => "ble_link: a ${length}-byte address where six bytes are needed"
+            return out

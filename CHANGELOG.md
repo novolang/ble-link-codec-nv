@@ -4,6 +4,77 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## Unreleased — 2026-10-10
+
+### Changed
+
+- **The `pub const` finding is corrected.**  The compiler defect it
+  names — a `pub const` in a `match` pattern read as a binding, and the
+  same constant lowering to IR that `llvm-as` refuses — is fixed in
+  novo 0.20.2.  This package has no workaround to revert: it declares no
+  opcode constants, so the three control-PDU tables in `ble_link` have
+  no constants to name and none can be restored.  The sentence in the
+  0.1.0 entry below that says the tables are "written with literals
+  where the constants would read better" is left as written, and it was
+  never true of this source.  No line under `src/` changed.
+
+## 0.1.0 — 2026-10-10
+
+The bodies, over the interface 0.0.2 published. Every doc comment's
+`novo` example runs, both modules cross-compile for a Cortex-M4, and
+the merged line coverage under `src/` is full — provided by
+`tests/ble_link_tests.nv`, `tests/ble_channel_tests.nv` and a new
+`tests/ble_link_edge_tests.nv` for the paths the API suite does not
+reach.
+
+- **A malformed packet is a value.** Every refusal the codec makes is
+  an `LlError` variant whose message names the numbers it was given,
+  and no function here panics on bytes off the air.
+- **Every field keeps the specification's unit.** A connection
+  interval, a supervision timeout, a transmit window and an instant
+  cross the boundary as the numbers § 2.3.3.1 and § 2.4.2.1 define, and
+  nothing converts a millisecond.
+- **`LlAdvPduHeader` carries the ChSel bit**, and an encoded PDU writes
+  it clear: § 2.3 puts the bit in the advertising header, and no
+  `LlAdvPdu` variant holds a channel-selection choice.
+- **A code this package does not know keeps its number.** A reserved
+  advertising type decodes to `LlAdvReserved(c)`, an undefined control
+  opcode to `LlUnknownControlOpcode(op)`, and the reserved LLID to
+  `LlDataReserved`, so a decode of a capture reports what it saw rather
+  than guessing.
+- **`control_parameter_length` is a control PDU's wire length** and
+  each encoder sizes its buffer from it exactly, because the device
+  tier builds a byte list by filling a buffer and never by growing one.
+
+### Findings
+
+- The permutation of § 4.5.8.3.3 reverses the eight bits of each byte
+  and leaves the two bytes where they are. Permuting all sixteen bits
+  is the plausible misreading, and the § 4.5.8.3.5 sample channels are
+  what rule it out.
+- `list.try_push` drops a value that does not fit rather than growing
+  the buffer or failing, so a buffer sized one byte short truncates a
+  packet in silence. The CONNECT_IND's eleven parameter bytes were
+  found this way: a declared length of ten lost the last one, and the
+  round trip that re-decoded the truncated packet still passed.
+- A tail expression inside a `system` block is discarded by novo
+  0.20.1 — an `Int` yields zero and a value that owns heap memory
+  crashes — so every `system` block here delivers its value with an
+  explicit `return`.  Filed as
+  `a-system-block-in-value-position-discards-its-value` and fixed in
+  0.20.2 for a function's own tail; the `return`s stay until
+  `a-system-block-whose-value-is-a-result-call-is-refused-at-a-device-boundary`
+  closes, which is what a device build of these functions still meets.
+- A `pub const` named in a `match` pattern is a binding rather than a
+  pattern, and the same constant used as one lowers to IR that
+  `llvm-as` refuses, so the control-PDU opcode tables are written with
+  literals where the constants would read better.
+- `tests/ble_link_tests.nv` holds one assertion that cannot hold.
+  `test_an_adv_ind_is_its_header_its_address_and_its_data` reads
+  `wire[7]` for the flags AD's length byte, which the same test's own
+  layout puts at `wire[9]`; it is left as written, and
+  `tests/ble_link_edge_tests.nv` asserts the same encoding.
+
 ## 0.0.2 — 2026-09-15
 
 README rewritten to the package README style guide (docs/writing-a-readme.md); no change to the interface.
