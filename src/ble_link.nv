@@ -217,22 +217,22 @@ fn put_addresses(var out: [u8], pdu: LlAdvPdu)
     system
         match pdu
             AdvInd(advertiser, _)                =>
-                put_address(out, advertiser)
+                put_address(var out, advertiser)
             AdvDirectInd(advertiser, target)     =>
-                put_address(out, advertiser)
-                put_address(out, target)
+                put_address(var out, advertiser)
+                put_address(var out, target)
             AdvNonconnInd(advertiser, _)         =>
-                put_address(out, advertiser)
+                put_address(var out, advertiser)
             AdvScanInd(advertiser, _)            =>
-                put_address(out, advertiser)
+                put_address(var out, advertiser)
             ScanReq(scanner, advertiser)         =>
-                put_address(out, scanner)
-                put_address(out, advertiser)
+                put_address(var out, scanner)
+                put_address(var out, advertiser)
             ScanRsp(advertiser, _)               =>
-                put_address(out, advertiser)
+                put_address(var out, advertiser)
             ConnectInd(initiator, advertiser, _) =>
-                put_address(out, initiator)
-                put_address(out, advertiser)
+                put_address(var out, initiator)
+                put_address(var out, advertiser)
             AdvExtInd(_)                         =>
                 let _ = 0
 
@@ -242,17 +242,17 @@ fn put_payload(var out: [u8], pdu: LlAdvPdu)
     system
         match pdu
             AdvInd(_, data)           =>
-                put_bytes(out, data)
+                put_bytes(var out, data)
             AdvNonconnInd(_, data)    =>
-                put_bytes(out, data)
+                put_bytes(var out, data)
             AdvScanInd(_, data)       =>
-                put_bytes(out, data)
+                put_bytes(var out, data)
             ScanRsp(_, data)          =>
-                put_bytes(out, data)
+                put_bytes(var out, data)
             ConnectInd(_, _, payload) =>
-                put_bytes(out, encode_connect_ind_payload(payload))
+                put_bytes(var out, encode_connect_ind_payload(payload))
             AdvExtInd(payload)        =>
-                put_bytes(out, payload)
+                put_bytes(var out, payload)
             _                         =>
                 let _ = 0
 
@@ -262,11 +262,11 @@ pub fn encode_adv_pdu(pdu: LlAdvPdu) -> [u8]
         var out: [u8] = list.with_capacity(2 + adv_payload_length(pdu))
         // `LlAdvPdu` carries no ChSel bit, so an encoded PDU has it
         // clear.
-        put_byte(out, pack_adv_header(adv_type_code(adv_pdu_type(pdu)), false,
+        put_byte(var out, pack_adv_header(adv_type_code(adv_pdu_type(pdu)), false,
                                       adv_tx_add(pdu), adv_rx_add(pdu)))
-        put_byte(out, adv_payload_length(pdu))
-        put_addresses(out, pdu)
-        put_payload(out, pdu)
+        put_byte(var out, adv_payload_length(pdu))
+        put_addresses(var out, pdu)
+        put_payload(var out, pdu)
         return out
 
 // The `count`-byte little-endian integer at `at`.
@@ -379,10 +379,10 @@ pub fn decode_adv_header(bytes: [u8]) -> Result<LlAdvPduHeader, LlError>
 pub fn encode_adv_header(header: LlAdvPduHeader) -> [u8]
     system
         var out: [u8] = list.with_capacity(2)
-        put_byte(out, pack_adv_header(adv_type_code(header.pdu_type),
+        put_byte(var out, pack_adv_header(adv_type_code(header.pdu_type),
                                       header.channel_selection,
                                       header.tx_add, header.rx_add))
-        put_byte(out, header.length)
+        put_byte(var out, header.length)
         return out
 
 // The four-bit code an advertising PDU type is.
@@ -430,15 +430,15 @@ pub fn adv_pdu_type(pdu: LlAdvPdu) -> LlAdvType
 pub fn encode_connect_ind_payload(payload: LlConnectIndPayload) -> [u8]
     system
         var out: [u8] = list.with_capacity(CONNECT_IND_LL_DATA_LEN)
-        put_le(out, payload.access_address, 4)
-        put_le(out, payload.crc_init, 3)
-        put_byte(out, payload.window_size)
-        put_le(out, payload.window_offset, 2)
-        put_le(out, payload.interval, 2)
-        put_le(out, payload.latency, 2)
-        put_le(out, payload.timeout, 2)
-        put_bytes(out, payload.channel_map.mask)
-        put_byte(out, payload.hop_increment | (payload.sleep_clock_accuracy << 5))
+        put_le(var out, payload.access_address, 4)
+        put_le(var out, payload.crc_init, 3)
+        put_byte(var out, payload.window_size)
+        put_le(var out, payload.window_offset, 2)
+        put_le(var out, payload.interval, 2)
+        put_le(var out, payload.latency, 2)
+        put_le(var out, payload.timeout, 2)
+        put_bytes(var out, payload.channel_map.mask)
+        put_byte(var out, payload.hop_increment | (payload.sleep_clock_accuracy << 5))
         return out
 
 // The five mask bytes at `at` as a channel map, without the width check
@@ -537,9 +537,9 @@ pub fn encode_ad_structures(structures: [AdStructure]) -> [u8]
     system
         var out: [u8] = list.with_capacity(ad_structures_length(structures))
         for structure in structures
-            put_byte(out, 1 + list.len(structure.data))
-            put_byte(out, structure.ad_type)
-            put_bytes(out, structure.data)
+            put_byte(var out, 1 + list.len(structure.data))
+            put_byte(var out, structure.ad_type)
+            put_bytes(var out, structure.data)
         return out
 
 // Read the AD structures out of advertising data.
@@ -655,8 +655,8 @@ pub fn encode_data_header(header: LlDataHeader) -> [u8]
         if header.more_data
             first = first | 0x10
         var out: [u8] = list.with_capacity(2)
-        put_byte(out, first)
-        put_byte(out, header.length)
+        put_byte(var out, first)
+        put_byte(var out, header.length)
         return out
 
 // Read a data-channel PDU header.
@@ -792,42 +792,42 @@ fn version_at(bytes: [u8], at: Int) -> LlVersion
 pub fn encode_control_pdu(pdu: LlControlPdu) -> [u8]
     system
         var out: [u8] = list.with_capacity(1 + control_parameter_length(pdu))
-        put_byte(out, control_opcode(pdu))
+        put_byte(var out, control_opcode(pdu))
         match pdu
             ConnectionUpdateInd(window_size, window_offset, interval, latency, timeout, instant) =>
-                put_byte(out, window_size)
-                put_le(out, window_offset, 2)
-                put_le(out, interval, 2)
-                put_le(out, latency, 2)
-                put_le(out, timeout, 2)
-                put_le(out, instant, 2)
+                put_byte(var out, window_size)
+                put_le(var out, window_offset, 2)
+                put_le(var out, interval, 2)
+                put_le(var out, latency, 2)
+                put_le(var out, timeout, 2)
+                put_le(var out, instant, 2)
             ChannelMapInd(map, instant)                                                          =>
-                put_bytes(out, map.mask)
-                put_le(out, instant, 2)
+                put_bytes(var out, map.mask)
+                put_le(var out, instant, 2)
             TerminateInd(error_code)                                                             =>
-                put_byte(out, error_code)
+                put_byte(var out, error_code)
             EncReq(rand, ediv, skd, iv)                                                          =>
-                put_bytes(out, rand)
-                put_le(out, ediv, 2)
-                put_bytes(out, skd)
-                put_bytes(out, iv)
+                put_bytes(var out, rand)
+                put_le(var out, ediv, 2)
+                put_bytes(var out, skd)
+                put_bytes(var out, iv)
             EncRsp(skd, iv)                                                                      =>
-                put_bytes(out, skd)
-                put_bytes(out, iv)
+                put_bytes(var out, skd)
+                put_bytes(var out, iv)
             UnknownRsp(unknown_type)                                                             =>
-                put_byte(out, unknown_type)
+                put_byte(var out, unknown_type)
             FeatureReq(features)                                                                 =>
-                put_bytes(out, features)
+                put_bytes(var out, features)
             FeatureRsp(features)                                                                 =>
-                put_bytes(out, features)
+                put_bytes(var out, features)
             VersionInd(version)                                                                  =>
-                put_byte(out, version.version_number)
-                put_le(out, version.company_identifier, 2)
-                put_le(out, version.subversion_number, 2)
+                put_byte(var out, version.version_number)
+                put_le(var out, version.company_identifier, 2)
+                put_le(var out, version.subversion_number, 2)
             RejectInd(error_code)                                                                =>
-                put_byte(out, error_code)
+                put_byte(var out, error_code)
             PeripheralFeatureReq(features)                                                       =>
-                put_bytes(out, features)
+                put_bytes(var out, features)
             _                                                                                    =>
                 let _ = 0
         return out
