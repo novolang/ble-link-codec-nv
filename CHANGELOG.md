@@ -4,6 +4,11 @@ Every published version, newest first. This file is on the publish
 allow-list, so it travels with the package: it is the only thing a
 consumer deciding whether to upgrade can read.
 
+## 0.1.1 — 2026-11-09
+
+Withdrawn: The Link Layer moved into noble-controller, with its PDU buffer in noble-radio and the advertising-data codecs in noble-hci.  `novo pkg add ble-link-codec-nv` now refuses and names `noble-controller`; a project that already depends on this
+package keeps building.  No source changed.
+
 ## Unreleased — 2026-10-10
 
 ### Changed
